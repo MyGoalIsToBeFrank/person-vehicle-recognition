@@ -1,0 +1,32 @@
+# 独立训练环境；现有 independent 推理环境不安装这些依赖。
+onnx>=1.16,<2
+onnxruntime>=1.23,<2
+numpy<2
+# CUDA Torch 按 README 单独装入 config.TORCH_PACKAGE_DIR，避免污染 Paddle 环境。
+scikit-learn>=1.4
+PyYAML>=6
+tqdm>=4.66
+pandas>=2
+seaborn>=0.13
+matplotlib>=3.8
+thop>=0.1.1
+tensorboard>=2.16
+opencv-python<=4.6.0.66
+prettytable>=3
+ujson>=5
+visualdl>=2.5
+gast==0.3.3
+easydict>=1.13
+setuptools<81
+typeguard
+shapely
+scipy
+terminaltables
+Cython
+pycocotools==2.0.8
+# PaddleDetection 源码导入时会注册这些可选任务模块。
+imgaug>=0.4.0
+pyclipper
+lapx
+motmetrics
+sklearn==0.0

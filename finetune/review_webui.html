@@ -1,0 +1,239 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>人工金标准核对</title>
+  <style>
+    :root { color-scheme: dark; font-family: system-ui, sans-serif; }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #10151c; color: #edf2f7; }
+    header { position: sticky; top: 0; z-index: 5; display: flex; gap: 10px; align-items: center; padding: 10px 16px; background: #18202b; border-bottom: 1px solid #344154; }
+    button, input { font: inherit; }
+    button { padding: 7px 13px; border: 1px solid #53657d; border-radius: 5px; background: #253247; color: white; cursor: pointer; }
+    button.active, button.primary { background: #1769aa; }
+    button.danger { margin-left: auto; background: #762a2a; }
+    button:disabled { opacity: .45; cursor: not-allowed; }
+    #position { width: 72px; padding: 6px; }
+    #message { color: #8bd3a7; min-width: 130px; }
+    main { display: grid; grid-template-columns: minmax(520px, 1.4fr) minmax(390px, 1fr); gap: 16px; padding: 16px; }
+    section { background: #18202b; border: 1px solid #344154; border-radius: 8px; padding: 12px; min-width: 0; }
+    h2 { margin: 0 0 10px; font-size: 16px; }
+    #canvas-wrap { position: relative; width: 100%; background: #090c10; }
+    canvas { display: block; width: 100%; max-height: calc(100vh - 155px); object-fit: contain; touch-action: none; cursor: crosshair; }
+    #box-tools { display: flex; gap: 8px; align-items: center; margin: 0 0 10px; }
+    #sample-id, #box-id { color: #aab9ca; word-break: break-all; }
+    #sample-id { margin: 8px 0; }
+    #box-id { margin-left: auto; }
+    fieldset { margin: 0 0 8px; padding: 6px 10px; border: 1px solid #44536a; border-radius: 6px; }
+    legend { color: #a9c7ee; }
+    label { display: inline-flex; gap: 5px; align-items: center; margin: 5px 12px 5px 0; }
+    .hint { color: #9facbd; font-size: 13px; line-height: 1.55; }
+    .empty { padding: 28px 8px; color: #9facbd; text-align: center; border: 1px dashed #53657d; border-radius: 6px; }
+    @media (max-width: 950px) { main { grid-template-columns: 1fr; } header { flex-wrap: wrap; } canvas { max-height: 65vh; } }
+  </style>
+</head>
+<body>
+  <header>
+    <button id="tab-attribute" class="active">属性核对</button>
+    <button id="tab-mask">口罩核对</button>
+    <button id="previous">保存并上一张</button>
+    <input id="position" type="number" min="1" value="1">
+    <span id="count">/ 0</span>
+    <button id="next">保存并下一张</button>
+    <button id="save" class="primary">保存当前整图</button>
+    <span id="message"></span>
+    <button id="exclude" class="danger">排除整图</button>
+  </header>
+  <main>
+    <section>
+      <h2>完整原图（人物/人脸框可编辑）</h2>
+      <div id="canvas-wrap"><canvas id="full"></canvas></div>
+      <div id="sample-id"></div>
+      <div class="hint">先把本图所有目标框调整完，再逐框核对右侧标签。点击框选择；拖动框可移动，拖动四角可缩放。</div>
+    </section>
+    <section>
+      <div id="box-tools">
+        <button id="add-box">新增框</button>
+        <button id="delete-box">删除当前框</button>
+        <button id="previous-box">上一框</button>
+        <button id="next-box">下一框</button>
+        <span id="box-position">框 0 / 0</span>
+        <span id="box-id"></span>
+      </div>
+      <form id="form"></form>
+      <div class="hint">继承框保留模型预测标签；调整框不会重算标签。新增框标签为空，补全后才能保存。保存整图后才生成训练裁剪并进入人工金标准；此图以后不再出现。</div>
+    </section>
+  </main>
+  <script>
+    const attributes = ["Hat","Glasses","ShortSleeve","LongSleeve","UpperStride","UpperLogo","UpperPlaid","UpperSplice","LowerStripe","LowerPattern","LongCoat","Trousers","Shorts","Skirt&Dress","Boots","HandBag","ShoulderBag","Backpack","HoldObjectsInFront","AgeLess18","Age18-60","AgeOver60","Female","Front","Side","Back"];
+    const names = {Hat:"帽子",Glasses:"眼镜",UpperStride:"上装条纹",UpperLogo:"上装标志",UpperPlaid:"上装格纹",UpperSplice:"上装撞色/拼接",LowerStripe:"下装条纹",LowerPattern:"下装图案",LongCoat:"长款大衣/风衣",Trousers:"长裤",Shorts:"短裤","Skirt&Dress":"裙装",Boots:"靴子",HoldObjectsInFront:"手持物品"};
+    const byId = id => document.getElementById(id);
+    let section = "属性", index = 0, count = 0, record = null, boxes = [], selected = -1;
+    let image = new Image(), scale = 1, interaction = null, addMode = false, serial = 0;
+
+    function radio(group, value, text, checked) {
+      return `<label><input type="radio" name="${group}" value="${value}" ${checked ? "checked" : ""}>${text}</label>`;
+    }
+    function checkbox(name, labels) {
+      return `<label><input type="checkbox" name="${name}" ${labels?.[name] ? "checked" : ""}>${names[name]}</label>`;
+    }
+    function bodyForm(labels) {
+      const empty = labels == null;
+      const gender = radio("gender","male","男",!empty && !labels.Female) + radio("gender","female","女",labels?.Female);
+      const age = radio("age","AgeLess18","未满18岁",labels?.AgeLess18) + radio("age","Age18-60","18至60岁",labels?.["Age18-60"]) + radio("age","AgeOver60","60岁以上",labels?.AgeOver60);
+      const direction = radio("direction","Front","正面",labels?.Front) + radio("direction","Side","侧面",labels?.Side) + radio("direction","Back","背面",labels?.Back);
+      const sleeve = radio("sleeve","ShortSleeve","短袖",labels?.ShortSleeve) + radio("sleeve","LongSleeve","长袖",labels?.LongSleeve);
+      const bagValue = labels && (["HandBag","ShoulderBag","Backpack"].find(x => labels[x]) || "none");
+      const bags = radio("bag","none","无",bagValue === "none") + radio("bag","HandBag","手提包",bagValue === "HandBag") + radio("bag","ShoulderBag","单肩包",bagValue === "ShoulderBag") + radio("bag","Backpack","双肩包",bagValue === "Backpack");
+      const simple = ["Hat","Glasses","HoldObjectsInFront","Boots"].map(x => checkbox(x,labels)).join("");
+      const upper = ["UpperStride","UpperLogo","UpperPlaid","UpperSplice","LongCoat"].map(x => checkbox(x,labels)).join("");
+      const lower = ["LowerStripe","LowerPattern","Trousers","Shorts","Skirt&Dress"].map(x => checkbox(x,labels)).join("");
+      return `${empty ? '<div class="hint">新增框：请补全必选项。</div>' : ''}<fieldset><legend>基本</legend>${gender}${age}${direction}</fieldset><fieldset><legend>穿戴</legend>${simple}</fieldset><fieldset><legend>上装</legend>${sleeve}<br>${upper}</fieldset><fieldset><legend>下装</legend>${lower}</fieldset><fieldset><legend>包</legend>${bags}</fieldset>`;
+    }
+    function maskForm(label) {
+      return `${label == null ? '<div class="hint">新增框：请选择口罩标签。</div>' : ''}<fieldset><legend>口罩</legend>${radio("mask","w/o mask","未佩戴",label === "w/o mask")}${radio("mask","w/ mask","佩戴",label === "w/ mask")}</fieldset>`;
+    }
+    function selectedValue(name) {
+      const element = document.querySelector(`input[name="${name}"]:checked`);
+      if (!element) throw new Error(`请补全 ${name}`);
+      return element.value;
+    }
+    function formLabel() {
+      if (section === "口罩") return selectedValue("mask");
+      const labels = Object.fromEntries(attributes.map(name => [name, false]));
+      labels.Female = selectedValue("gender") === "female";
+      labels[selectedValue("age")] = true;
+      labels[selectedValue("direction")] = true;
+      labels[selectedValue("sleeve")] = true;
+      const bag = selectedValue("bag"); if (bag !== "none") labels[bag] = true;
+      ["Hat","Glasses","HoldObjectsInFront","Boots","UpperStride","UpperLogo","UpperPlaid","UpperSplice","LongCoat","LowerStripe","LowerPattern","Trousers","Shorts","Skirt&Dress"].forEach(name => labels[name] = document.querySelector(`input[name="${name}"]`).checked);
+      return labels;
+    }
+    function commitForm() {
+      if (selected >= 0) boxes[selected].标签 = formLabel();
+    }
+    async function request(url, options) {
+      const response = await fetch(url, options), value = await response.json();
+      if (!response.ok) throw new Error(value.error || response.statusText);
+      return value;
+    }
+    async function refreshSummary() {
+      const value = await request("/api/summary");
+      byId("tab-attribute").textContent = `属性核对 ${value.属性.待核对}/${value.属性.已保存}`;
+      byId("tab-mask").textContent = `口罩核对 ${value.口罩.待核对}/${value.口罩.已保存}`;
+    }
+    async function load() {
+      let value;
+      try {
+        value = await request(`/api/record?section=${encodeURIComponent(section)}&index=${index}`);
+      } catch(error) {
+        if(String(error.message).includes("没有待核对原图")){showDone();return;}
+        throw error;
+      }
+      record = value.record; count = value.count; index = value.index;
+      boxes = structuredClone(record.框); selected = boxes.length ? 0 : -1; addMode = false;
+      ["previous","next","save","exclude","add-box","position"].forEach(id=>byId(id).disabled=false);
+      byId("position").value = index + 1; byId("position").max = count; byId("count").textContent = `/ ${count}`;
+      byId("sample-id").textContent = record.id; byId("add-box").classList.remove("active");
+      await loadImage(); renderForm(); setMessage(""); await refreshSummary();
+    }
+    function loadImage() {
+      return new Promise((resolve, reject) => {
+        image = new Image();
+        image.onload = () => { resizeCanvas(); resolve(); };
+        image.onerror = reject;
+        image.src = `/api/image?section=${encodeURIComponent(section)}&index=${index}&t=${Date.now()}`;
+      });
+    }
+    function resizeCanvas() {
+      const canvas = byId("full"), available = canvas.parentElement.clientWidth;
+      scale = Math.min(1, available / image.naturalWidth);
+      canvas.width = Math.round(image.naturalWidth * scale); canvas.height = Math.round(image.naturalHeight * scale);
+      draw();
+    }
+    function draw() {
+      const canvas = byId("full"), context = canvas.getContext("2d");
+      context.clearRect(0,0,canvas.width,canvas.height); context.drawImage(image,0,0,canvas.width,canvas.height);
+      boxes.forEach((item, i) => {
+        const [x1,y1,x2,y2] = item.框.map(v => v*scale), active = i === selected;
+        context.strokeStyle = active ? "#ff2d2d" : "#ff9f1a"; context.lineWidth = active ? 3 : 2;
+        context.strokeRect(x1,y1,x2-x1,y2-y1);
+        context.fillStyle = context.strokeStyle; context.font = "bold 14px system-ui"; context.fillText(String(i+1),x1+4,y1+16);
+        if (active) for (const [x,y] of [[x1,y1],[x2,y1],[x1,y2],[x2,y2]]) { context.fillRect(x-5,y-5,10,10); }
+      });
+    }
+    function renderForm() {
+      byId("box-position").textContent = `框 ${selected < 0 ? 0 : selected+1} / ${boxes.length}`;
+      byId("box-id").textContent = selected < 0 ? "" : boxes[selected].id;
+      byId("delete-box").disabled = selected < 0;
+      byId("previous-box").disabled = boxes.length < 2;
+      byId("next-box").disabled = boxes.length < 2;
+      byId("form").innerHTML = selected < 0 ? '<div class="empty">当前整图没有框；可新增，或直接保存为检测负样本。</div>' : section === "属性" ? bodyForm(boxes[selected].标签) : maskForm(boxes[selected].标签);
+      draw();
+    }
+    function point(event) {
+      const rect = byId("full").getBoundingClientRect();
+      return [(event.clientX-rect.left)*byId("full").width/rect.width/scale,(event.clientY-rect.top)*byId("full").height/rect.height/scale];
+    }
+    function hit(x,y) {
+      const tolerance = 10/scale;
+      for (let i=boxes.length-1;i>=0;i--) {
+        const [x1,y1,x2,y2]=boxes[i].框;
+        const corners=[[x1,y1,"nw"],[x2,y1,"ne"],[x1,y2,"sw"],[x2,y2,"se"]];
+        for (const [cx,cy,corner] of corners) if (Math.abs(x-cx)<=tolerance && Math.abs(y-cy)<=tolerance) return {index:i,mode:"resize",corner};
+        if (x>=x1&&x<=x2&&y>=y1&&y<=y2) return {index:i,mode:"move"};
+      }
+      return null;
+    }
+    byId("full").addEventListener("pointerdown", event => {
+      const [x,y]=point(event); byId("full").setPointerCapture(event.pointerId);
+      // 框编辑阶段允许多个新增空框；必选标签只在保存整图时统一校验。
+      if(selected>=0)try{commitForm();}catch(_){}
+      if (addMode) { interaction={mode:"add",start:[x,y]}; boxes.push({id:`${record.id}_new_${Date.now()}_${serial++}`,框:[x,y,x+1,y+1],标签:null}); selected=boxes.length-1; renderForm(); return; }
+      const found=hit(x,y); if(!found){selected=-1;renderForm();return;}
+      selected=found.index; interaction={...found,start:[x,y],original:[...boxes[selected].框]}; renderForm();
+    });
+    byId("full").addEventListener("pointermove", event => {
+      if(!interaction)return; const [x,y]=point(event), width=image.naturalWidth, height=image.naturalHeight;
+      if(interaction.mode==="add") boxes[selected].框=[Math.max(0,Math.min(interaction.start[0],x)),Math.max(0,Math.min(interaction.start[1],y)),Math.min(width,Math.max(interaction.start[0],x)),Math.min(height,Math.max(interaction.start[1],y))];
+      else if(interaction.mode==="move") { const dx=x-interaction.start[0],dy=y-interaction.start[1],[x1,y1,x2,y2]=interaction.original,w=x2-x1,h=y2-y1,nx=Math.max(0,Math.min(width-w,x1+dx)),ny=Math.max(0,Math.min(height-h,y1+dy)); boxes[selected].框=[nx,ny,nx+w,ny+h]; }
+      else { let [x1,y1,x2,y2]=interaction.original; if(interaction.corner.includes("w"))x1=Math.min(x,x2-4);if(interaction.corner.includes("e"))x2=Math.max(x,x1+4);if(interaction.corner.includes("n"))y1=Math.min(y,y2-4);if(interaction.corner.includes("s"))y2=Math.max(y,y1+4);boxes[selected].框=[Math.max(0,x1),Math.max(0,y1),Math.min(width,x2),Math.min(height,y2)]; }
+      draw();
+    });
+    function finishInteraction() {
+      if(interaction?.mode==="add") {
+        addMode=false; byId("add-box").classList.remove("active"); setMessage(""); renderForm();
+      }
+      interaction=null;
+    }
+    byId("full").addEventListener("pointerup", finishInteraction);
+    byId("full").addEventListener("pointercancel", finishInteraction);
+    byId("full").addEventListener("lostpointercapture", finishInteraction);
+    function payloadBoxes(){ commitForm(); return boxes.map(item=>({id:item.id,框:item.框.map(Math.round),标签:item.标签})); }
+    async function saveCurrent() {
+      if(!record) throw new Error("本栏没有待核对原图");
+      const value=await request("/api/review",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({section,id:record.id,"框":payloadBoxes()})});
+      setMessage("整图已进入人工金标准"); await refreshSummary(); return value;
+    }
+    async function saveAndLoad(targetIndex) { try { await saveCurrent(); index=Math.max(0,targetIndex); await load(); } catch(error) { if(String(error.message).includes("没有待核对原图")){showDone();} else {setMessage(error.message,true);throw error;} } }
+    function showDone(){record=null;boxes=[];selected=-1;count=0;byId("position").value=0;byId("count").textContent="/ 0";byId("form").innerHTML='<div class="empty">本栏已经全部核对完成。</div>';["previous","next","save","exclude","add-box","delete-box","previous-box","next-box","position"].forEach(id=>byId(id).disabled=true);const c=byId("full"),ctx=c.getContext("2d");ctx.clearRect(0,0,c.width,c.height);setMessage("本栏已完成");refreshSummary();}
+    function setMessage(text,error=false){byId("message").textContent=text;byId("message").style.color=error?"#ff8585":"#8bd3a7";}
+    async function switchSection(next){if(next===section)return;try{if(record)await saveCurrent();section=next;index=0;byId("tab-attribute").classList.toggle("active",section==="属性");byId("tab-mask").classList.toggle("active",section==="口罩");await load();}catch(error){setMessage(error.message,true);}}
+    byId("tab-attribute").onclick=()=>switchSection("属性");byId("tab-mask").onclick=()=>switchSection("口罩");
+    byId("add-box").onclick=()=>{addMode=!addMode;byId("add-box").classList.toggle("active",addMode);setMessage(addMode?"请在原图拖出新框":"");};
+    byId("delete-box").onclick=()=>{if(selected<0)return;boxes.splice(selected,1);selected=Math.min(selected,boxes.length-1);renderForm();};
+    function selectBox(delta){if(!boxes.length)return;if(selected>=0)try{commitForm();}catch(_){}selected=(Math.max(0,selected)+delta+boxes.length)%boxes.length;renderForm();}
+    byId("previous-box").onclick=()=>selectBox(-1);byId("next-box").onclick=()=>selectBox(1);
+    byId("form").addEventListener("change",()=>{try{commitForm();setMessage("");}catch(_){}});
+    byId("save").onclick=async()=>{try{await saveAndLoad(index);}catch(_){}};
+    byId("next").onclick=async()=>{try{await saveAndLoad(index);}catch(_){}};
+    byId("previous").onclick=async()=>{try{await saveAndLoad(Math.max(0,index-1));}catch(_){}};
+    byId("position").onchange=async()=>{try{const target=Math.max(0,Number(byId("position").value)-1),adjusted=target>index?target-1:target;await saveAndLoad(adjusted);}catch(_){}};
+    byId("exclude").onclick=async()=>{if(!record||!confirm("整图将从候选队列排除，不进入人工金标准；原图不会删除。继续？"))return;try{await request("/api/candidate",{method:"DELETE",headers:{"Content-Type":"application/json"},body:JSON.stringify({section,id:record.id})});await load();}catch(error){if(String(error.message).includes("没有待核对原图"))showDone();else setMessage(error.message,true);}};
+    addEventListener("resize",()=>{if(image.complete&&image.naturalWidth)resizeCanvas();});
+    addEventListener("keydown",event=>{if(event.ctrlKey&&event.key.toLowerCase()==="s"){event.preventDefault();byId("save").click();}else if(!["INPUT","SELECT"].includes(event.target.tagName)&&event.key==="Delete")byId("delete-box").click();else if(!["INPUT","SELECT"].includes(event.target.tagName)&&event.key==="ArrowRight")byId("next").click();else if(!["INPUT","SELECT"].includes(event.target.tagName)&&event.key==="ArrowLeft")byId("previous").click();});
+    refreshSummary().then(load).catch(error=>setMessage(error.message,true));
+  </script>
+</body>
+</html>
