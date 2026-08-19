@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""把 AIZOO 整图、人脸框与口罩标签导入候选队列；不生成训练裁剪。"""
+"""第三阶段入口：把 AIZOO 整图、人脸框与口罩类别导入口罩候选（COCO）。"""
 
 from __future__ import annotations
 
@@ -11,16 +11,18 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 PROJECT_ROOT = HERE.parent
-sys.path.insert(0, str(PROJECT_ROOT / "independent"))
+sys.path.insert(0, str(PROJECT_ROOT / "inference"))
 sys.path.insert(0, str(HERE))
 
 import config  # noqa: E402
 from dataset_schema import (  # noqa: E402
-    frame_id,
-    load_candidates,
-    load_gold,
-    save_candidates,
+    annotation_id,
+    image_id,
+    load_dataset,
+    mask_category_id,
+    save_dataset,
     stored_path,
+    xyxy_to_xywh,
 )
 
 
@@ -36,7 +38,7 @@ def image_for_xml(xml_path: Path, filename: str) -> Path:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="导入 AIZOO 口罩整图候选")
+    parser = argparse.ArgumentParser(description="导入 AIZOO 口罩整图候选（COCO）")
     parser.add_argument("--input-dir", type=Path, default=config.RAW_DATA_DIR / "aizoo")
     parser.add_argument("--limit", type=int)
     parser.add_argument("--checkpoint-every", type=int, default=100)
@@ -45,9 +47,11 @@ def main() -> int:
     if args.limit is not None:
         xml_files = xml_files[: args.limit]
 
-    candidates = load_candidates(config.CANDIDATES_PATH)
-    gold = load_gold(config.GOLD_LABELS_PATH)
-    known = {frame["id"] for frame in candidates["口罩"]} | {frame["id"] for frame in gold["口罩"]}
+    candidates = load_dataset(config.MASK_CANDIDATES_PATH, "mask", "aizoo", gold=False)
+    gold = load_dataset(config.MASK_GOLD_PATH, "mask", "human", gold=True)
+    known = {image["id"] for image in candidates["images"]} | {
+        image["source_image_id"] for image in gold["images"]
+    }
     added_frames = 0
     added_boxes = 0
     for xml_number, xml_path in enumerate(xml_files, 1):
@@ -57,13 +61,13 @@ def main() -> int:
             raise ValueError(f"XML 缺少 filename: {xml_path}")
         image_path = image_for_xml(xml_path, filename)
         full_path = stored_path(image_path, config.PROJECT_ROOT)
-        candidate_id = frame_id("口罩", full_path)
+        candidate_id = image_id("mask", full_path)
         if candidate_id in known:
             continue
         size = root.find("size")
         width = int(size.findtext("width", "0")) if size is not None else 0
         height = int(size.findtext("height", "0")) if size is not None else 0
-        boxes = []
+        annotations = []
         for box_number, item in enumerate(root.findall("object")):
             source_name = item.findtext("name")
             if source_name not in {"face", "face_mask", "face_nask"}:
@@ -71,29 +75,33 @@ def main() -> int:
             bounds = item.find("bndbox")
             if bounds is None:
                 continue
-            box = [
-                max(0, int(float(bounds.findtext("xmin", "0")))),
-                max(0, int(float(bounds.findtext("ymin", "0")))),
-                min(width, int(float(bounds.findtext("xmax", "0")))) if width else int(float(bounds.findtext("xmax", "0"))),
-                min(height, int(float(bounds.findtext("ymax", "0")))) if height else int(float(bounds.findtext("ymax", "0"))),
-            ]
-            if box[2] <= box[0] or box[3] <= box[1]:
+            left = max(0, int(float(bounds.findtext("xmin", "0"))))
+            top = max(0, int(float(bounds.findtext("ymin", "0"))))
+            right = min(width, int(float(bounds.findtext("xmax", "0")))) if width else int(float(bounds.findtext("xmax", "0")))
+            bottom = min(height, int(float(bounds.findtext("ymax", "0")))) if height else int(float(bounds.findtext("ymax", "0")))
+            if right <= left or bottom <= top:
                 continue
-            boxes.append(
+            annotations.append(
                 {
-                    "id": f"{candidate_id}_{box_number:03d}",
-                    "框": box,
-                    "标签": "w/ mask" if source_name in {"face_mask", "face_nask"} else "w/o mask",
+                    "id": annotation_id(candidate_id, box_number),
+                    "image_id": candidate_id,
+                    "category_id": mask_category_id(
+                        "w/ mask" if source_name in {"face_mask", "face_nask"} else "w/o mask"
+                    ),
+                    "bbox": [float(v) for v in xyxy_to_xywh([left, top, right, bottom])],
                 }
             )
-        candidates["口罩"].append({"id": candidate_id, "全图": full_path, "框": boxes})
+        candidates["images"].append(
+            {"id": candidate_id, "file_name": full_path, "width": width, "height": height}
+        )
+        candidates["annotations"].extend(annotations)
         known.add(candidate_id)
         added_frames += 1
-        added_boxes += len(boxes)
+        added_boxes += len(annotations)
         if xml_number % args.checkpoint_every == 0:
-            save_candidates(config.CANDIDATES_PATH, candidates)
+            save_dataset(config.MASK_CANDIDATES_PATH, candidates, "mask", "aizoo", gold=False)
             print(f"[{xml_number}/{len(xml_files)}] 新增整图 {added_frames}，人脸框 {added_boxes}", flush=True)
-    save_candidates(config.CANDIDATES_PATH, candidates)
+    save_dataset(config.MASK_CANDIDATES_PATH, candidates, "mask", "aizoo", gold=False)
     print(f"完成: 新增口罩整图 {added_frames}，人脸框 {added_boxes}")
     return 0
 

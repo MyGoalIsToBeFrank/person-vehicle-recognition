@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""只读取人工 gold_labels.json，基于当前 PP-HGNet_small 权重微调属性模型。"""
+"""读取 2_attribute/gold.json（及 4_augmented/attribute 训练划分），微调 PP-HGNet_small。"""
 
 from __future__ import annotations
 
 import argparse
-import hashlib
 import os
 import random
 import subprocess
@@ -15,7 +14,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 PROJECT_ROOT = HERE.parent
 os.environ.setdefault("FLAGS_enable_pir_api", "0")
-sys.path.insert(0, str(PROJECT_ROOT / "independent"))
+sys.path.insert(0, str(PROJECT_ROOT / "inference"))
 sys.path.insert(0, str(HERE))
 
 import config  # noqa: E402
@@ -27,8 +26,13 @@ import numpy as np  # noqa: E402
 import paddle  # noqa: E402
 
 from attribute_model import build_from_deployment  # noqa: E402
-from business_degradation import business_degradation  # noqa: E402
-from dataset_schema import BODY_ATTRIBUTES, flatten_gold, load_gold, resolved_path  # noqa: E402
+from dataset_schema import (  # noqa: E402
+    BODY_ATTRIBUTES,
+    flatten_annotations,
+    load_dataset,
+    resolved_path,
+    split_name,
+)
 
 
 def arguments() -> argparse.Namespace:
@@ -42,35 +46,37 @@ def arguments() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def split_name(full_image: str) -> str:
-    bucket = int(hashlib.sha1(full_image.encode("utf-8")).hexdigest()[:8], 16) % 10
-    return "test" if bucket == 0 else "val" if bucket == 1 else "train"
-
-
 class AttributeDataset(paddle.io.Dataset):
-    def __init__(self, records: list[dict], training: bool):
+    def __init__(self, records: list[dict]):
         self.records = records
-        self.training = training
+        # 裁剪小图总量约百 MB 级，一次性解码进内存，避免每个 epoch 反复读盘解码。
+        # 不做任何在线增强，增强只来自离线尘土化副本。
+        self.cache: dict[int, np.ndarray] = {}
+        total_bytes = 0
+        for index, record in enumerate(records):
+            path = resolved_path(record["image"]["file_name"], config.PROJECT_ROOT)
+            image = cv2.imdecode(np.fromfile(path, dtype=np.uint8), cv2.IMREAD_COLOR)
+            if image is None:
+                raise ValueError(f"无法读取训练图片: {path}")
+            self.cache[index] = image
+            total_bytes += image.nbytes
+        print(
+            f"属性数据集预载 {len(self.cache)} 张到内存（{total_bytes / 2**20:.0f} MB）",
+            flush=True,
+        )
 
     def __len__(self) -> int:
         return len(self.records)
 
     def __getitem__(self, index: int) -> tuple[np.ndarray, np.ndarray]:
         record = self.records[index]
-        path = resolved_path(record["图片"], config.PROJECT_ROOT)
-        image = cv2.imdecode(np.fromfile(path, dtype=np.uint8), cv2.IMREAD_COLOR)
-        if image is None:
-            raise ValueError(f"无法读取训练图片: {path}")
-        if self.training:
-            image = business_degradation(image)
-            if random.random() < 0.5:
-                image = cv2.flip(image, 1)
+        image = self.cache[index]
         image = cv2.resize(image, (192, 256), interpolation=cv2.INTER_LINEAR)
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
         image = image.transpose(2, 0, 1)
         mean = np.asarray([0.485, 0.456, 0.406], dtype=np.float32)[:, None, None]
         std = np.asarray([0.229, 0.224, 0.225], dtype=np.float32)[:, None, None]
-        target = np.asarray([record["标签"][name] for name in BODY_ATTRIBUTES], dtype=np.float32)
+        target = np.asarray([record["attributes"][name] for name in BODY_ATTRIBUTES], dtype=np.float32)
         return (image - mean) / std, target
 
 
@@ -145,27 +151,37 @@ def main() -> int:
     paddle.seed(args.seed)
     np.random.seed(args.seed)
     random.seed(args.seed)
-    gold = load_gold(config.GOLD_LABELS_PATH)
-    records = flatten_gold(gold, "属性")
-    train_records = [row for row in records if split_name(row["全图"]) == "train"]
-    val_records = [row for row in records if split_name(row["全图"]) == "val"]
+    gold = load_dataset(config.ATTRIBUTE_GOLD_PATH, "attribute", "human", gold=True)
+    records = flatten_annotations(gold)
+    augmented_path = config.AUGMENTED_DATA_DIR / "attribute/annotations.json"
+    if augmented_path.is_file():
+        augmented = load_dataset(augmented_path, "attribute", "augmented", gold=True)
+        records += [
+            row
+            for row in flatten_annotations(augmented)
+            if split_name(row["image"]["source_image_id"]) == "train"
+        ]
+    train_records = [row for row in records if split_name(row["image"]["source_image_id"]) == "train"]
+    val_records = [row for row in records if split_name(row["image"]["source_image_id"]) == "val"]
     if not train_records or not val_records:
         raise ValueError(f"训练/验证样本不足: train={len(train_records)}, val={len(val_records)}")
 
     device = args.device.lower()
-    model = build_from_deployment(config.PERSON_ATTRIBUTE_DIR, config.PADDLECLAS_DIR, device)
+    # 微调起点固定用官方部署权重；输出仍到 models/finetuned/person_attribute。
+    base_model_dir = config.MODEL_DIR / "human/PPHGNet_small_person_attribute_954_infer"
+    model = build_from_deployment(base_model_dir, config.PADDLECLAS_DIR, device)
     if args.checkpoint:
         model.set_state_dict(paddle.load(str(args.checkpoint)))
 
     train_loader = paddle.io.DataLoader(
-        AttributeDataset(train_records, True),
+        AttributeDataset(train_records),
         batch_size=args.batch_size,
         shuffle=True,
         drop_last=False,
         num_workers=0,
     )
     val_loader = paddle.io.DataLoader(
-        AttributeDataset(val_records, False),
+        AttributeDataset(val_records),
         batch_size=args.batch_size,
         shuffle=False,
         drop_last=False,

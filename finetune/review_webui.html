@@ -3,237 +3,826 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>人工金标准核对</title>
+  <title>金标准数据管线</title>
   <style>
-    :root { color-scheme: dark; font-family: system-ui, sans-serif; }
+    :root {
+      color-scheme: dark;
+      --bg: #0a0e14;
+      --panel: rgba(21, 28, 40, .78);
+      --panel-solid: #151c28;
+      --panel-2: rgba(148, 163, 184, .07);
+      --border: rgba(148, 163, 184, .14);
+      --border-strong: rgba(148, 163, 184, .3);
+      --text: #e8eef7;
+      --muted: #93a1b5;
+      --accent: #7c93ff;
+      --accent-2: #5560e8;
+      --accent-soft: rgba(124, 147, 255, .15);
+      --ok: #3ecf9a;
+      --warn: #f5c15c;
+      --danger: #e3645f;
+      --shadow: 0 10px 30px rgba(2, 6, 14, .45);
+      font-family: "Inter", "HarmonyOS Sans SC", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+    }
     * { box-sizing: border-box; }
-    body { margin: 0; background: #10151c; color: #edf2f7; }
-    header { position: sticky; top: 0; z-index: 5; display: flex; gap: 10px; align-items: center; padding: 10px 16px; background: #18202b; border-bottom: 1px solid #344154; }
-    button, input { font: inherit; }
-    button { padding: 7px 13px; border: 1px solid #53657d; border-radius: 5px; background: #253247; color: white; cursor: pointer; }
-    button.active, button.primary { background: #1769aa; }
-    button.danger { margin-left: auto; background: #762a2a; }
-    button:disabled { opacity: .45; cursor: not-allowed; }
-    #position { width: 72px; padding: 6px; }
-    #message { color: #8bd3a7; min-width: 130px; }
-    main { display: grid; grid-template-columns: minmax(520px, 1.4fr) minmax(390px, 1fr); gap: 16px; padding: 16px; }
-    section { background: #18202b; border: 1px solid #344154; border-radius: 8px; padding: 12px; min-width: 0; }
-    h2 { margin: 0 0 10px; font-size: 16px; }
-    #canvas-wrap { position: relative; width: 100%; background: #090c10; }
-    canvas { display: block; width: 100%; max-height: calc(100vh - 155px); object-fit: contain; touch-action: none; cursor: crosshair; }
-    #box-tools { display: flex; gap: 8px; align-items: center; margin: 0 0 10px; }
-    #sample-id, #box-id { color: #aab9ca; word-break: break-all; }
-    #sample-id { margin: 8px 0; }
-    #box-id { margin-left: auto; }
-    fieldset { margin: 0 0 8px; padding: 6px 10px; border: 1px solid #44536a; border-radius: 6px; }
-    legend { color: #a9c7ee; }
-    label { display: inline-flex; gap: 5px; align-items: center; margin: 5px 12px 5px 0; }
-    .hint { color: #9facbd; font-size: 13px; line-height: 1.55; }
-    .empty { padding: 28px 8px; color: #9facbd; text-align: center; border: 1px dashed #53657d; border-radius: 6px; }
-    @media (max-width: 950px) { main { grid-template-columns: 1fr; } header { flex-wrap: wrap; } canvas { max-height: 65vh; } }
+    html { scrollbar-color: rgba(148,163,184,.35) transparent; }
+    body {
+      margin: 0; color: var(--text); min-height: 100vh;
+      background:
+        radial-gradient(1100px 520px at 85% -10%, rgba(85, 96, 232, .14), transparent 60%),
+        radial-gradient(900px 480px at -8% 108%, rgba(56, 189, 248, .09), transparent 60%),
+        var(--bg);
+    }
+    button, input, select { font: inherit; }
+    button {
+      padding: 7px 15px; border: 1px solid var(--border); border-radius: 9px;
+      background: var(--panel-2); color: var(--text); cursor: pointer;
+      transition: transform .12s ease, border-color .15s, background .15s, box-shadow .15s;
+    }
+    button:hover:not(:disabled) { border-color: var(--accent); background: var(--accent-soft); transform: translateY(-1px); }
+    button:active:not(:disabled) { transform: translateY(0); }
+    button:disabled { opacity: .38; cursor: not-allowed; }
+    button.primary {
+      background: linear-gradient(135deg, #6d7cff, var(--accent-2));
+      border-color: transparent; color: #fff; font-weight: 600;
+      box-shadow: 0 4px 16px rgba(85, 96, 232, .35);
+    }
+    button.primary:hover:not(:disabled) { background: linear-gradient(135deg, #7f8bff, #5f6af0); box-shadow: 0 6px 20px rgba(85, 96, 232, .45); }
+    button.danger { color: #ff9a95; border-color: rgba(227, 100, 95, .4); background: rgba(227, 100, 95, .08); }
+    button.danger:hover:not(:disabled) { border-color: var(--danger); background: rgba(227, 100, 95, .16); }
+    .tabs {
+      display: flex; gap: 4px; padding: 4px; border-radius: 999px;
+      background: rgba(10, 14, 20, .55); border: 1px solid var(--border);
+    }
+    button.tab { border: none; border-radius: 999px; padding: 7px 16px; color: var(--muted); background: transparent; }
+    button.tab:hover:not(:disabled) { background: var(--panel-2); transform: none; }
+    button.tab.active {
+      background: linear-gradient(135deg, #6d7cff, var(--accent-2)); color: #fff;
+      box-shadow: 0 3px 12px rgba(85, 96, 232, .4);
+    }
+    button.tab .n { opacity: .72; font-size: 11.5px; margin-left: 7px; font-weight: 400; }
+    input[type=number], select {
+      background: rgba(10, 14, 20, .6); color: var(--text); border: 1px solid var(--border);
+      border-radius: 8px; padding: 6px 9px; transition: border-color .15s, box-shadow .15s;
+    }
+    input[type=number]:focus, select:focus {
+      outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft);
+    }
+    header {
+      position: sticky; top: 0; z-index: 10; display: flex; gap: 18px; align-items: center;
+      padding: 12px 22px; background: rgba(10, 14, 20, .78);
+      border-bottom: 1px solid var(--border); backdrop-filter: blur(14px); flex-wrap: wrap;
+    }
+    .brand { display: flex; gap: 10px; align-items: center; }
+    .brand-dot {
+      width: 26px; height: 26px; border-radius: 8px;
+      background: linear-gradient(135deg, #6d7cff, #38bdf8);
+      box-shadow: 0 3px 10px rgba(85, 96, 232, .5);
+    }
+    header .title { font-size: 16.5px; font-weight: 650; letter-spacing: 1px; }
+    #message { margin-left: auto; font-size: 13.5px; color: var(--ok); display: inline-flex; align-items: center; gap: 7px; }
+    #message:not(:empty)::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+    #message.error { color: #ff8f8a; }
+    #progress-hint { font-size: 12.5px; color: var(--warn); display: inline-flex; align-items: center; gap: 7px; }
+    #progress-hint:not(:empty)::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; opacity: .8; }
+    main { padding: 20px 22px 28px; max-width: 1560px; margin: 0 auto; }
+    .toolbar {
+      display: flex; gap: 10px; align-items: center; margin-bottom: 16px; flex-wrap: wrap;
+      background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+      padding: 10px 14px; backdrop-filter: blur(10px);
+    }
+    .toolbar .spacer { flex: 1; }
+    .toolbar .pos { display: flex; gap: 7px; align-items: center; color: var(--muted); font-size: 13.5px; }
+    .toolbar .pos input { width: 72px; text-align: center; }
+    .scope-switch {
+      display: inline-flex; gap: 3px; padding: 3px; border-radius: 10px;
+      background: rgba(10, 14, 20, .55); border: 1px solid var(--border);
+    }
+    .scope-switch button {
+      border: none; background: transparent; padding: 5px 13px; border-radius: 8px;
+      color: var(--muted); font-size: 13px;
+    }
+    .scope-switch button:hover:not(:disabled) { transform: none; background: var(--panel-2); }
+    .scope-switch button.active {
+      background: var(--accent-soft); color: var(--text);
+      box-shadow: 0 0 0 1px var(--accent) inset;
+    }
+    .grid { display: grid; grid-template-columns: minmax(480px, 1.5fr) minmax(380px, 1fr); gap: 18px; }
+    .card {
+      background: var(--panel); border: 1px solid var(--border); border-radius: 14px;
+      padding: 16px 18px; min-width: 0; box-shadow: var(--shadow); backdrop-filter: blur(10px);
+    }
+    .card h2 {
+      margin: 0 0 12px; font-size: 13px; color: var(--muted); font-weight: 600;
+      letter-spacing: .6px; display: flex; align-items: center; gap: 8px;
+    }
+    .card h2::before { content: ""; width: 4px; height: 14px; border-radius: 2px; background: linear-gradient(180deg, #6d7cff, #38bdf8); }
+    .canvas-wrap {
+      background: #070a0f; border-radius: 10px; overflow: hidden;
+      border: 1px solid rgba(148, 163, 184, .1);
+    }
+    canvas { display: block; width: 100%; max-height: calc(100vh - 240px); object-fit: contain; touch-action: none; cursor: crosshair; }
+    .crop-wrap {
+      background: #070a0f; border-radius: 10px; border: 1px solid rgba(148, 163, 184, .1);
+      display: flex; justify-content: center; align-items: center; min-height: 340px; padding: 10px;
+    }
+    .crop-wrap img {
+      max-width: 100%; max-height: calc(100vh - 270px); min-height: 240px; object-fit: contain;
+      border-radius: 6px; box-shadow: 0 6px 24px rgba(0, 0, 0, .5);
+    }
+    .crop-wrap img:not([src]) { display: none; }
+    .sample-id {
+      color: var(--muted); font-size: 12px; margin-top: 10px; word-break: break-all;
+      font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; opacity: .85;
+    }
+    .hint { color: var(--muted); font-size: 12.5px; line-height: 1.7; margin-top: 10px; }
+    .empty { padding: 42px 12px; color: var(--muted); text-align: center; border: 1px dashed var(--border-strong); border-radius: 10px; }
+    fieldset {
+      margin: 0 0 10px; padding: 9px 12px 11px; border: 1px solid var(--border);
+      border-radius: 10px; background: rgba(148, 163, 184, .04);
+    }
+    legend { color: var(--accent); font-size: 12px; font-weight: 600; letter-spacing: 1px; padding: 0 5px; }
+    label.opt {
+      position: relative; display: inline-flex; gap: 6px; align-items: center;
+      margin: 4px 8px 4px 0; padding: 5px 13px; cursor: pointer; user-select: none;
+      border: 1px solid var(--border); border-radius: 999px; color: var(--muted);
+      font-size: 13px; transition: all .14s;
+    }
+    label.opt:hover { border-color: var(--border-strong); color: var(--text); }
+    label.opt input { position: absolute; opacity: 0; pointer-events: none; }
+    label.opt:has(input:checked) {
+      background: var(--accent-soft); border-color: var(--accent); color: var(--text);
+      box-shadow: 0 0 0 1px var(--accent) inset, 0 2px 10px rgba(85, 96, 232, .18);
+    }
+    label.opt:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .box-list { display: flex; flex-direction: column; gap: 6px; max-height: 46vh; overflow: auto; padding-right: 4px; }
+    .box-list::-webkit-scrollbar { width: 8px; }
+    .box-list::-webkit-scrollbar-thumb { background: rgba(148, 163, 184, .25); border-radius: 4px; }
+    .box-item {
+      display: flex; gap: 9px; align-items: center; padding: 8px 12px; border-radius: 9px;
+      border: 1px solid var(--border); background: var(--panel-2); cursor: pointer;
+      font-size: 12.5px; font-family: ui-monospace, Consolas, monospace; transition: all .13s;
+    }
+    .box-item:hover { border-color: var(--border-strong); }
+    .box-item.active { border-color: var(--accent); background: var(--accent-soft); box-shadow: 3px 0 0 var(--accent) inset; }
+    .box-item .tag { color: var(--muted); }
+    .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; margin-bottom: 18px; }
+    .stat {
+      background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+      padding: 12px 15px; position: relative; overflow: hidden; backdrop-filter: blur(10px);
+    }
+    .stat::before {
+      content: ""; position: absolute; top: 0; left: 0; right: 0; height: 2px;
+      background: linear-gradient(90deg, #6d7cff, #38bdf8); opacity: .75;
+    }
+    .stat .k { color: var(--muted); font-size: 12px; letter-spacing: .4px; }
+    .stat .v { font-size: 22px; font-weight: 680; margin-top: 3px; }
+    .form-row { display: flex; gap: 16px; align-items: center; margin: 11px 0; flex-wrap: wrap; }
+    .form-row .k { color: var(--muted); min-width: 76px; font-size: 13.5px; }
+    input[type=range] { -webkit-appearance: none; appearance: none; width: 180px; height: 5px; border-radius: 3px; background: rgba(148, 163, 184, .25); }
+    input[type=range]::-webkit-slider-thumb {
+      -webkit-appearance: none; width: 16px; height: 16px; border-radius: 50%;
+      background: linear-gradient(135deg, #6d7cff, #38bdf8); cursor: pointer;
+      box-shadow: 0 2px 8px rgba(85, 96, 232, .5);
+    }
+    input[type=range]::-moz-range-thumb {
+      width: 16px; height: 16px; border: none; border-radius: 50%;
+      background: linear-gradient(135deg, #6d7cff, #38bdf8); cursor: pointer;
+    }
+    .preview-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 14px; }
+    .preview-pair {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 8px; padding: 10px;
+      background: var(--panel-2); border: 1px solid var(--border); border-radius: 12px;
+    }
+    .preview-pair img { width: 100%; border-radius: 8px; border: 1px solid var(--border); }
+    .preview-pair .cap { text-align: center; color: var(--muted); font-size: 11.5px; letter-spacing: .5px; }
+    progress { width: 100%; height: 8px; -webkit-appearance: none; appearance: none; }
+    progress::-webkit-progress-bar { background: rgba(148, 163, 184, .18); border-radius: 4px; }
+    progress::-webkit-progress-value { background: linear-gradient(90deg, #6d7cff, #38bdf8); border-radius: 4px; }
+    progress::-moz-progress-bar { background: linear-gradient(90deg, #6d7cff, #38bdf8); border-radius: 4px; }
+    #context-overlay {
+      position: fixed; inset: 0; background: rgba(4, 7, 12, .82); z-index: 50;
+      display: none; align-items: center; justify-content: center; padding: 32px;
+      backdrop-filter: blur(8px); cursor: zoom-out;
+    }
+    #context-overlay img { max-width: 100%; max-height: 100%; border-radius: 12px; box-shadow: 0 20px 60px rgba(0, 0, 0, .6); }
+    @media (max-width: 980px) { .grid { grid-template-columns: 1fr; } canvas { max-height: 62vh; } }
   </style>
 </head>
 <body>
   <header>
-    <button id="tab-attribute" class="active">属性核对</button>
-    <button id="tab-mask">口罩核对</button>
-    <button id="previous">保存并上一张</button>
-    <input id="position" type="number" min="1" value="1">
-    <span id="count">/ 0</span>
-    <button id="next">保存并下一张</button>
-    <button id="save" class="primary">保存当前整图</button>
+    <span class="brand"><span class="brand-dot"></span><span class="title">金标准数据管线</span></span>
+    <div class="tabs">
+      <button id="tab-detection" class="tab active">① 目标识别<span class="n"></span></button>
+      <button id="tab-attribute" class="tab">② 属性标注<span class="n"></span></button>
+      <button id="tab-mask" class="tab">③ 口罩标注<span class="n"></span></button>
+      <button id="tab-augment" class="tab">④ 尘土化<span class="n"></span></button>
+    </div>
+    <span id="progress-hint"></span>
     <span id="message"></span>
-    <button id="exclude" class="danger">排除整图</button>
   </header>
+
   <main>
-    <section>
-      <h2>完整原图（人物/人脸框可编辑）</h2>
-      <div id="canvas-wrap"><canvas id="full"></canvas></div>
-      <div id="sample-id"></div>
-      <div class="hint">先把本图所有目标框调整完，再逐框核对右侧标签。点击框选择；拖动框可移动，拖动四角可缩放。</div>
-    </section>
-    <section>
-      <div id="box-tools">
-        <button id="add-box">新增框</button>
-        <button id="delete-box">删除当前框</button>
-        <button id="previous-box">上一框</button>
-        <button id="next-box">下一框</button>
-        <span id="box-position">框 0 / 0</span>
-        <span id="box-id"></span>
+    <!-- 阶段一：目标识别 -->
+    <section id="page-detection">
+      <div class="toolbar">
+        <button id="det-prev">保存并上一张</button>
+        <span class="pos"><input id="det-pos" type="number" min="1" value="1"><span id="det-count">/ 0</span></span>
+        <button id="det-next">保存并下一张</button>
+        <button id="det-save" class="primary">确认整图</button>
+        <span class="scope-switch"><button id="det-scope-pending" class="active">待核对</button><button id="det-scope-saved">回改已确认</button></span>
+        <span class="spacer"></span>
+        <button id="det-add">新增框</button>
+        <button id="det-del">删除当前框</button>
+        <button id="det-exclude" class="danger">排除整图</button>
       </div>
-      <form id="form"></form>
-      <div class="hint">继承框保留模型预测标签；调整框不会重算标签。新增框标签为空，补全后才能保存。保存整图后才生成训练裁剪并进入人工金标准；此图以后不再出现。</div>
+      <div class="grid">
+        <div class="card">
+          <h2>完整原图（只核对人物框，不标属性）</h2>
+          <div class="canvas-wrap"><canvas id="det-canvas"></canvas></div>
+          <div id="det-sample" class="sample-id"></div>
+          <div class="hint">点击框选择；拖动移动，拖动四角缩放。确认后自动生成本图所有人物裁剪并预标注属性，进入「② 属性标注」。</div>
+        </div>
+        <div class="card">
+          <h2>本图人物框</h2>
+          <div id="det-boxes" class="box-list"></div>
+          <div class="hint">框数为 0 时直接确认，可作为检测负样本。快捷键：Q/E 上一张/下一张（自动保存），Enter 确认，A/D 切换框，N 新增框，Delete 删除框。</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 阶段二：属性标注 -->
+    <section id="page-attribute" hidden>
+      <div class="toolbar">
+        <button id="attr-prev">保存并上一个</button>
+        <span class="pos"><input id="attr-pos" type="number" min="1" value="1"><span id="attr-count">/ 0</span></span>
+        <button id="attr-next">保存并下一个</button>
+        <button id="attr-save" class="primary">保存属性</button>
+        <span class="scope-switch"><button id="attr-scope-pending" class="active">待标注</button><button id="attr-scope-saved">回改已保存</button></span>
+        <span class="spacer"></span>
+        <button id="attr-context">查看原图</button>
+        <button id="attr-exclude" class="danger">排除裁剪</button>
+      </div>
+      <div class="grid">
+        <div class="card">
+          <h2>人物裁剪（模型已预标注，只需检查更改）</h2>
+          <div class="crop-wrap"><img id="attr-img" alt="人物裁剪"></div>
+          <div id="attr-sample" class="sample-id"></div>
+        </div>
+        <div class="card">
+          <h2>26 项属性</h2>
+          <form id="attr-form"></form>
+          <div class="hint">预标注为空的裁剪需要补全必选项（性别、年龄、朝向、袖长、包）后才能保存。快捷键：Q/E 上一个/下一个（自动保存），Enter 保存。</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 阶段三：口罩标注 -->
+    <section id="page-mask" hidden>
+      <div class="toolbar">
+        <button id="mask-prev">保存并上一个</button>
+        <span class="pos"><input id="mask-pos" type="number" min="1" value="1"><span id="mask-count">/ 0</span></span>
+        <button id="mask-next">保存并下一个</button>
+        <button id="mask-save" class="primary">保存口罩</button>
+        <span class="scope-switch"><button id="mask-scope-pending" class="active">待核对</button><button id="mask-scope-saved">回改已保存</button></span>
+        <span class="spacer"></span>
+        <button id="mask-exclude" class="danger">排除裁剪</button>
+      </div>
+      <div class="grid">
+        <div class="card">
+          <h2>带上下文的人脸裁剪（AIZOO 标签已预填）</h2>
+          <div class="crop-wrap"><img id="mask-img" alt="人脸裁剪"></div>
+          <div id="mask-sample" class="sample-id"></div>
+        </div>
+        <div class="card">
+          <h2>口罩标签</h2>
+          <form id="mask-form"></form>
+          <div class="hint">保存后裁剪落盘到 3_mask/images/ 并写入口罩金标准。快捷键：1/2 选未佩戴/佩戴，Q/E 上一个/下一个（自动保存），Enter 保存。</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 阶段四：尘土化 -->
+    <section id="page-augment" hidden>
+      <div id="aug-stats" class="stat-grid"></div>
+      <div class="grid">
+        <div class="card">
+          <h2>增强参数（几何不变、标签不变；每次重建该环节增强集）</h2>
+          <div class="form-row"><span class="k">增强环节</span>
+            <select id="aug-stage">
+              <option value="attribute">属性裁剪（2_attribute/gold）</option>
+              <option value="mask">口罩裁剪（3_mask/gold）</option>
+              <option value="detection">检测整图（1_detection/confirmed）</option>
+            </select>
+          </div>
+          <div class="form-row"><span class="k">每样本副本</span><input id="aug-variants" type="number" min="1" max="5" value="2"></div>
+          <div class="form-row"><span class="k">强度</span><input id="aug-intensity" type="range" min="0.5" max="2" step="0.1" value="1"><span id="aug-intensity-v">1.0</span></div>
+          <div class="form-row"><span class="k">随机种子</span><input id="aug-seed" type="number" value="20260817"></div>
+          <fieldset><legend>效果开关</legend>
+            <label class="opt"><input type="checkbox" id="eff-dust" checked>尘土（斑块/颗粒/拖痕）</label>
+            <label class="opt"><input type="checkbox" id="eff-yellow" checked>昏黄（暖色+幕罩）</label>
+            <label class="opt"><input type="checkbox" id="eff-low_light" checked>低照度</label>
+            <label class="opt"><input type="checkbox" id="eff-blur" checked>模糊</label>
+            <label class="opt"><input type="checkbox" id="eff-noise" checked>噪声</label>
+            <label class="opt"><input type="checkbox" id="eff-jpeg" checked>JPEG 压缩</label>
+          </fieldset>
+          <div class="form-row">
+            <button id="aug-preview">预览效果</button>
+            <button id="aug-run" class="primary">开始生成</button>
+          </div>
+          <div id="aug-progress-wrap" hidden>
+            <progress id="aug-progress" max="1" value="0"></progress>
+            <div id="aug-progress-text" class="hint"></div>
+          </div>
+          <div id="aug-result" class="hint"></div>
+        </div>
+        <div class="card">
+          <h2>效果预览（左原图 / 右增强）</h2>
+          <div id="aug-preview-grid" class="preview-grid"><div class="empty">点击「预览效果」查看示例。</div></div>
+        </div>
+      </div>
     </section>
   </main>
-  <script>
-    const attributes = ["Hat","Glasses","ShortSleeve","LongSleeve","UpperStride","UpperLogo","UpperPlaid","UpperSplice","LowerStripe","LowerPattern","LongCoat","Trousers","Shorts","Skirt&Dress","Boots","HandBag","ShoulderBag","Backpack","HoldObjectsInFront","AgeLess18","Age18-60","AgeOver60","Female","Front","Side","Back"];
-    const names = {Hat:"帽子",Glasses:"眼镜",UpperStride:"上装条纹",UpperLogo:"上装标志",UpperPlaid:"上装格纹",UpperSplice:"上装撞色/拼接",LowerStripe:"下装条纹",LowerPattern:"下装图案",LongCoat:"长款大衣/风衣",Trousers:"长裤",Shorts:"短裤","Skirt&Dress":"裙装",Boots:"靴子",HoldObjectsInFront:"手持物品"};
-    const byId = id => document.getElementById(id);
-    let section = "属性", index = 0, count = 0, record = null, boxes = [], selected = -1;
-    let image = new Image(), scale = 1, interaction = null, addMode = false, serial = 0;
 
+  <div id="context-overlay"><img id="context-img" alt="原图上下文"></div>
+
+  <script>
+    const ATTRIBUTES = ["Hat","Glasses","ShortSleeve","LongSleeve","UpperStride","UpperLogo","UpperPlaid","UpperSplice","LowerStripe","LowerPattern","LongCoat","Trousers","Shorts","Skirt&Dress","Boots","HandBag","ShoulderBag","Backpack","HoldObjectsInFront","AgeLess18","Age18-60","AgeOver60","Female","Front","Side","Back"];
+    const ZH = {Hat:"帽子",Glasses:"眼镜",UpperStride:"上装条纹",UpperLogo:"上装标志",UpperPlaid:"上装格纹",UpperSplice:"上装撞色/拼接",LowerStripe:"下装条纹",LowerPattern:"下装图案",LongCoat:"长款大衣/风衣",Trousers:"长裤",Shorts:"短裤","Skirt&Dress":"裙装",Boots:"靴子",HoldObjectsInFront:"手持物品"};
+    const byId = id => document.getElementById(id);
+    let tab = "detection";
+
+    async function request(url, options) {
+      const response = await fetch(url, options), value = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(value.error || response.statusText);
+      return value;
+    }
+    function post(url, body) {
+      return request(url, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+    }
+    function setMessage(text, error = false) {
+      byId("message").textContent = text;
+      byId("message").classList.toggle("error", error);
+    }
+    async function refreshSummary() {
+      const value = await request("/api/summary");
+      byId("tab-detection").querySelector(".n").textContent = `${value.detection.待核对}待核/${value.detection.已确认}已确认`;
+      byId("tab-attribute").querySelector(".n").textContent = `${value.attribute.待标注}待标/${value.attribute.已保存}已存`;
+      byId("tab-mask").querySelector(".n").textContent = `${value.mask.待核对}待核/${value.mask.已保存}已存`;
+      // 建议起步量（与根 README「数据量建议」一致）：检测 500 整图，属性/口罩各 800 条。
+      const targets = [
+        ["检测整图", value.detection.已确认, 500],
+        ["属性裁剪", value.attribute.已保存, 800],
+        ["口罩裁剪", value.mask.已保存, 800],
+      ];
+      const short = targets.filter(([, saved, target]) => saved < target);
+      byId("progress-hint").textContent = short.length
+        ? short.map(([name, saved, target]) => `${name} ${saved}/${target}`).join(" · ") + "（建议起步量）"
+        : "各环节已达建议起步量";
+      const stats = byId("aug-stats");
+      stats.innerHTML = ["detection", "attribute", "mask"].map(stage => {
+        const row = value.augmented[stage];
+        const name = {detection: "检测整图", attribute: "属性裁剪", mask: "口罩裁剪"}[stage];
+        return `<div class="stat"><div class="k">${name}增强</div><div class="v">${row ? row.标注 : 0}</div></div>`;
+      }).join("") + `<div class="stat"><div class="k">属性预标注</div><div class="v" style="font-size:15px">${value.预标注}${value.预标注警告 ? " ⚠" : ""}</div></div>`;
+      if (value.预标注警告) console.warn(value.预标注警告);
+    }
+    function switchTab(next) {
+      tab = next;
+      for (const name of ["detection", "attribute", "mask", "augment"]) {
+        byId("page-" + name).hidden = name !== next;
+        byId("tab-" + name).classList.toggle("active", name === next);
+      }
+      setMessage("");
+      if (next === "detection") Detection.load(Detection.index);
+      if (next === "attribute") Attribute.load(Attribute.index);
+      if (next === "mask") MaskReview.load(MaskReview.index);
+    }
+    for (const name of ["detection", "attribute", "mask", "augment"])
+      byId("tab-" + name).onclick = () => switchTab(name);
+
+    // ---------- 阶段一：目标识别 ----------
+    const Detection = {
+      record: null, boxes: [], selected: -1, index: 0, count: 0, scope: "pending",
+      image: new Image(), scale: 1, interaction: null, addMode: false, serial: 0,
+
+      async load(index) {
+        let value;
+        try { value = await request(`/api/detection/record?index=${index}&scope=${this.scope}`); }
+        catch (error) {
+          if (String(error.message).includes("没有待核对") || String(error.message).includes("还没有已确认")) { this.done(); return; }
+          throw error;
+        }
+        this.record = value; this.index = value.index; this.count = value.count;
+        this.boxes = value.annotations.map(a => ({id: a.id, bbox: [...a.bbox]}));
+        this.selected = this.boxes.length ? 0 : -1; this.addMode = false;
+        byId("det-add").classList.remove("active");
+        byId("det-pos").value = this.index + 1; byId("det-pos").max = this.count;
+        byId("det-count").textContent = `/ ${this.count}`;
+        byId("det-sample").textContent = `${value.image.id} · ${value.image.file_name}`;
+        byId("det-exclude").style.display = this.scope === "saved" ? "none" : "";
+        for (const id of ["det-prev","det-next","det-save","det-add","det-pos"]) byId(id).disabled = false;
+        await this.loadImage(); this.render(); setMessage(""); refreshSummary();
+      },
+      loadImage() {
+        return new Promise((resolve, reject) => {
+          this.image = new Image();
+          this.image.onload = () => { this.resize(); resolve(); };
+          this.image.onerror = reject;
+          this.image.src = `/api/detection/image?id=${encodeURIComponent(this.record.image.id)}&t=${Date.now()}`;
+        });
+      },
+      resize() {
+        const canvas = byId("det-canvas"), available = canvas.parentElement.clientWidth;
+        this.scale = Math.min(1, available / this.image.naturalWidth);
+        canvas.width = Math.round(this.image.naturalWidth * this.scale);
+        canvas.height = Math.round(this.image.naturalHeight * this.scale);
+        this.draw();
+      },
+      draw() {
+        const canvas = byId("det-canvas"), ctx = canvas.getContext("2d");
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(this.image, 0, 0, canvas.width, canvas.height);
+        this.boxes.forEach((item, i) => {
+          const [x, y, w, h] = item.bbox.map(v => v * this.scale), active = i === this.selected;
+          ctx.strokeStyle = active ? "#ff2d2d" : "#ff9f1a"; ctx.lineWidth = active ? 3 : 2;
+          ctx.strokeRect(x, y, w, h);
+          ctx.fillStyle = ctx.strokeStyle; ctx.font = "bold 14px system-ui";
+          ctx.fillText(String(i + 1), x + 4, y + 16);
+          if (active) for (const [cx, cy] of [[x,y],[x+w,y],[x,y+h],[x+w,y+h]]) ctx.fillRect(cx-5, cy-5, 10, 10);
+        });
+      },
+      render() {
+        this.draw();
+        const list = byId("det-boxes");
+        list.innerHTML = this.boxes.length ? "" : '<div class="empty">当前整图没有框；可新增，或直接确认为检测负样本。</div>';
+        this.boxes.forEach((item, i) => {
+          const row = document.createElement("div");
+          row.className = "box-item" + (i === this.selected ? " active" : "");
+          row.innerHTML = `<span>#${i + 1}</span><span class="tag">${item.bbox.map(Math.round).join(", ")}</span>`;
+          row.onclick = () => { this.selected = i; this.render(); };
+          list.appendChild(row);
+        });
+        byId("det-del").disabled = this.selected < 0;
+      },
+      point(event) {
+        const canvas = byId("det-canvas"), rect = canvas.getBoundingClientRect();
+        return [(event.clientX - rect.left) * canvas.width / rect.width / this.scale,
+                (event.clientY - rect.top) * canvas.height / rect.height / this.scale];
+      },
+      hit(x, y) {
+        const t = 10 / this.scale;
+        for (let i = this.boxes.length - 1; i >= 0; i--) {
+          const [bx, by, bw, bh] = this.boxes[i].bbox;
+          for (const [cx, cy, corner] of [[bx,by,"nw"],[bx+bw,by,"ne"],[bx,by+bh,"sw"],[bx+bw,by+bh,"se"]])
+            if (Math.abs(x - cx) <= t && Math.abs(y - cy) <= t) return {index: i, mode: "resize", corner};
+          if (x >= bx && x <= bx + bw && y >= by && y <= by + bh) return {index: i, mode: "move"};
+        }
+        return null;
+      },
+      pointerDown(event) {
+        const [x, y] = this.point(event);
+        byId("det-canvas").setPointerCapture(event.pointerId);
+        if (this.addMode) {
+          this.interaction = {mode: "add", start: [x, y]};
+          this.boxes.push({id: `${this.record.image.id}_new_${Date.now()}_${this.serial++}`, bbox: [x, y, 1, 1]});
+          this.selected = this.boxes.length - 1; this.render(); return;
+        }
+        const found = this.hit(x, y);
+        if (!found) { this.selected = -1; this.render(); return; }
+        this.selected = found.index;
+        this.interaction = {...found, start: [x, y], original: [...this.boxes[this.selected].bbox]};
+        this.render();
+      },
+      pointerMove(event) {
+        if (!this.interaction) return;
+        const [x, y] = this.point(event), W = this.image.naturalWidth, H = this.image.naturalHeight;
+        const box = this.boxes[this.selected].bbox;
+        if (this.interaction.mode === "add") {
+          const [sx, sy] = this.interaction.start;
+          this.boxes[this.selected].bbox = [Math.max(0, Math.min(sx, x)), Math.max(0, Math.min(sy, y)),
+            Math.min(W, Math.max(sx, x)) - Math.max(0, Math.min(sx, x)),
+            Math.min(H, Math.max(sy, y)) - Math.max(0, Math.min(sy, y))];
+        } else if (this.interaction.mode === "move") {
+          const dx = x - this.interaction.start[0], dy = y - this.interaction.start[1];
+          const [ox, oy, ow, oh] = this.interaction.original;
+          this.boxes[this.selected].bbox = [Math.max(0, Math.min(W - ow, ox + dx)), Math.max(0, Math.min(H - oh, oy + dy)), ow, oh];
+        } else {
+          let [ox, oy, ow, oh] = this.interaction.original;
+          if (this.interaction.corner.includes("w")) { const nx = Math.min(x, ox + ow - 4); ow = ox + ow - nx; ox = nx; }
+          if (this.interaction.corner.includes("e")) ow = Math.max(x - ox, 4);
+          if (this.interaction.corner.includes("n")) { const ny = Math.min(y, oy + oh - 4); oh = oy + oh - ny; oy = ny; }
+          if (this.interaction.corner.includes("s")) oh = Math.max(y - oy, 4);
+          this.boxes[this.selected].bbox = [Math.max(0, ox), Math.max(0, oy), Math.min(W, ox + ow) - Math.max(0, ox), Math.min(H, oy + oh) - Math.max(0, oy)];
+        }
+        this.draw();
+      },
+      pointerEnd() {
+        if (this.interaction?.mode === "add") {
+          this.addMode = false; byId("det-add").classList.remove("active"); this.render();
+        }
+        this.interaction = null;
+      },
+      cycleBox(delta) {
+        if (!this.boxes.length) return;
+        this.selected = (Math.max(0, this.selected) + delta + this.boxes.length) % this.boxes.length;
+        this.render();
+      },
+      async save() {
+        if (!this.record) throw new Error("没有待核对原图");
+        if (this.scope === "saved" && !confirm("重新确认会按新框重建属性裁剪：框未动的标签保留；被删除框的属性标注（含金标准）会被移除。继续？"))
+          throw new Error("已取消");
+        const value = await post("/api/detection/confirm", {
+          image_id: this.record.image.id,
+          annotations: this.boxes.map(item => ({id: item.id, bbox: item.bbox.map(Math.round)})),
+        });
+        setMessage(value.updated ? "已更新确认记录" : `已确认，生成属性裁剪并预标注 ${value.预标注框}/${this.boxes.length} 框`);
+        await refreshSummary();
+      },
+      async saveAndLoad(target) {
+        try { await this.save(); await this.load(Math.max(0, target)); }
+        catch (error) {
+          if (String(error.message).includes("没有待核对") || String(error.message).includes("还没有已确认")) this.done();
+          else { setMessage(error.message, true); }
+        }
+      },
+      nextTarget() { return this.scope === "saved" ? this.index + 1 : this.index; },
+      goSave() { this.saveAndLoad(this.nextTarget()); },
+      goNext() { this.saveAndLoad(this.nextTarget()); },
+      goPrev() { this.saveAndLoad(Math.max(0, this.index - 1)); },
+      goJump() {
+        const target = Math.max(0, Number(byId("det-pos").value) - 1);
+        this.saveAndLoad(this.scope === "saved" ? target : (target > this.index ? target - 1 : target));
+      },
+      done() {
+        this.record = null; this.boxes = []; this.selected = -1; this.count = 0;
+        byId("det-pos").value = 0; byId("det-count").textContent = "/ 0";
+        byId("det-boxes").innerHTML = '<div class="empty">目标识别已全部核对完成。</div>';
+        for (const id of ["det-prev","det-next","det-save","det-exclude","det-add","det-del","det-pos"]) byId(id).disabled = true;
+        const canvas = byId("det-canvas");
+        canvas.getContext("2d").clearRect(0, 0, canvas.width, canvas.height);
+        setMessage("目标识别已完成"); refreshSummary();
+      },
+    };
+    const detCanvas = byId("det-canvas");
+    detCanvas.addEventListener("pointerdown", e => Detection.pointerDown(e));
+    detCanvas.addEventListener("pointermove", e => Detection.pointerMove(e));
+    detCanvas.addEventListener("pointerup", () => Detection.pointerEnd());
+    detCanvas.addEventListener("pointercancel", () => Detection.pointerEnd());
+    detCanvas.addEventListener("lostpointercapture", () => Detection.pointerEnd());
+    byId("det-add").onclick = () => {
+      Detection.addMode = !Detection.addMode;
+      byId("det-add").classList.toggle("active", Detection.addMode);
+      setMessage(Detection.addMode ? "请在原图拖出新框" : "");
+    };
+    byId("det-del").onclick = () => {
+      if (Detection.selected < 0) return;
+      Detection.boxes.splice(Detection.selected, 1);
+      Detection.selected = Math.min(Detection.selected, Detection.boxes.length - 1);
+      Detection.render();
+    };
+    byId("det-save").onclick = () => Detection.goSave();
+    byId("det-next").onclick = () => Detection.goNext();
+    byId("det-prev").onclick = () => Detection.goPrev();
+    byId("det-pos").onchange = () => Detection.goJump();
+    byId("det-exclude").onclick = async () => {
+      if (!Detection.record || !confirm("整图将从候选队列排除，不进入金标准；原图不会删除。继续？")) return;
+      try {
+        await post("/api/detection/exclude", {image_id: Detection.record.image.id});
+        await Detection.load(Detection.index);
+      } catch (error) {
+        if (String(error.message).includes("没有待核对")) Detection.done();
+        else setMessage(error.message, true);
+      }
+    };
+    addEventListener("resize", () => {
+      if (tab === "detection" && Detection.image.complete && Detection.image.naturalWidth) Detection.resize();
+    });
+
+    // ---------- 阶段二/三共用：裁剪核对 ----------
     function radio(group, value, text, checked) {
-      return `<label><input type="radio" name="${group}" value="${value}" ${checked ? "checked" : ""}>${text}</label>`;
+      return `<label class="opt"><input type="radio" name="${group}" value="${value}" ${checked ? "checked" : ""}>${text}</label>`;
     }
     function checkbox(name, labels) {
-      return `<label><input type="checkbox" name="${name}" ${labels?.[name] ? "checked" : ""}>${names[name]}</label>`;
+      return `<label class="opt"><input type="checkbox" name="${name}" ${labels?.[name] ? "checked" : ""}>${ZH[name]}</label>`;
     }
     function bodyForm(labels) {
       const empty = labels == null;
-      const gender = radio("gender","male","男",!empty && !labels.Female) + radio("gender","female","女",labels?.Female);
-      const age = radio("age","AgeLess18","未满18岁",labels?.AgeLess18) + radio("age","Age18-60","18至60岁",labels?.["Age18-60"]) + radio("age","AgeOver60","60岁以上",labels?.AgeOver60);
-      const direction = radio("direction","Front","正面",labels?.Front) + radio("direction","Side","侧面",labels?.Side) + radio("direction","Back","背面",labels?.Back);
-      const sleeve = radio("sleeve","ShortSleeve","短袖",labels?.ShortSleeve) + radio("sleeve","LongSleeve","长袖",labels?.LongSleeve);
+      const gender = radio("gender", "male", "男", !empty && !labels.Female) + radio("gender", "female", "女", labels?.Female);
+      const age = radio("age", "AgeLess18", "未满18岁", labels?.AgeLess18) + radio("age", "Age18-60", "18至60岁", labels?.["Age18-60"]) + radio("age", "AgeOver60", "60岁以上", labels?.AgeOver60);
+      const direction = radio("direction", "Front", "正面", labels?.Front) + radio("direction", "Side", "侧面", labels?.Side) + radio("direction", "Back", "背面", labels?.Back);
+      const sleeve = radio("sleeve", "ShortSleeve", "短袖", labels?.ShortSleeve) + radio("sleeve", "LongSleeve", "长袖", labels?.LongSleeve);
       const bagValue = labels && (["HandBag","ShoulderBag","Backpack"].find(x => labels[x]) || "none");
-      const bags = radio("bag","none","无",bagValue === "none") + radio("bag","HandBag","手提包",bagValue === "HandBag") + radio("bag","ShoulderBag","单肩包",bagValue === "ShoulderBag") + radio("bag","Backpack","双肩包",bagValue === "Backpack");
-      const simple = ["Hat","Glasses","HoldObjectsInFront","Boots"].map(x => checkbox(x,labels)).join("");
-      const upper = ["UpperStride","UpperLogo","UpperPlaid","UpperSplice","LongCoat"].map(x => checkbox(x,labels)).join("");
-      const lower = ["LowerStripe","LowerPattern","Trousers","Shorts","Skirt&Dress"].map(x => checkbox(x,labels)).join("");
-      return `${empty ? '<div class="hint">新增框：请补全必选项。</div>' : ''}<fieldset><legend>基本</legend>${gender}${age}${direction}</fieldset><fieldset><legend>穿戴</legend>${simple}</fieldset><fieldset><legend>上装</legend>${sleeve}<br>${upper}</fieldset><fieldset><legend>下装</legend>${lower}</fieldset><fieldset><legend>包</legend>${bags}</fieldset>`;
-    }
-    function maskForm(label) {
-      return `${label == null ? '<div class="hint">新增框：请选择口罩标签。</div>' : ''}<fieldset><legend>口罩</legend>${radio("mask","w/o mask","未佩戴",label === "w/o mask")}${radio("mask","w/ mask","佩戴",label === "w/ mask")}</fieldset>`;
+      const bags = radio("bag", "none", "无", bagValue === "none") + radio("bag", "HandBag", "手提包", bagValue === "HandBag") + radio("bag", "ShoulderBag", "单肩包", bagValue === "ShoulderBag") + radio("bag", "Backpack", "双肩包", bagValue === "Backpack");
+      const simple = ["Hat","Glasses","HoldObjectsInFront","Boots"].map(x => checkbox(x, labels)).join("");
+      const upper = ["UpperStride","UpperLogo","UpperPlaid","UpperSplice","LongCoat"].map(x => checkbox(x, labels)).join("");
+      const lower = ["LowerStripe","LowerPattern","Trousers","Shorts","Skirt&Dress"].map(x => checkbox(x, labels)).join("");
+      return `${empty ? '<div class="hint">该裁剪无模型预标注：请补全必选项。</div>' : ""}<fieldset><legend>基本</legend>${gender}${age}${direction}</fieldset><fieldset><legend>穿戴</legend>${simple}</fieldset><fieldset><legend>上装</legend>${sleeve}<br>${upper}</fieldset><fieldset><legend>下装</legend>${lower}</fieldset><fieldset><legend>包</legend>${bags}</fieldset>`;
     }
     function selectedValue(name) {
       const element = document.querySelector(`input[name="${name}"]:checked`);
       if (!element) throw new Error(`请补全 ${name}`);
       return element.value;
     }
-    function formLabel() {
-      if (section === "口罩") return selectedValue("mask");
-      const labels = Object.fromEntries(attributes.map(name => [name, false]));
+    function attributeFormValue() {
+      const labels = Object.fromEntries(ATTRIBUTES.map(name => [name, false]));
       labels.Female = selectedValue("gender") === "female";
       labels[selectedValue("age")] = true;
       labels[selectedValue("direction")] = true;
       labels[selectedValue("sleeve")] = true;
-      const bag = selectedValue("bag"); if (bag !== "none") labels[bag] = true;
-      ["Hat","Glasses","HoldObjectsInFront","Boots","UpperStride","UpperLogo","UpperPlaid","UpperSplice","LongCoat","LowerStripe","LowerPattern","Trousers","Shorts","Skirt&Dress"].forEach(name => labels[name] = document.querySelector(`input[name="${name}"]`).checked);
+      const bag = selectedValue("bag");
+      if (bag !== "none") labels[bag] = true;
+      ["Hat","Glasses","HoldObjectsInFront","Boots","UpperStride","UpperLogo","UpperPlaid","UpperSplice","LongCoat","LowerStripe","LowerPattern","Trousers","Shorts","Skirt&Dress"]
+        .forEach(name => labels[name] = document.querySelector(`input[name="${name}"]`).checked);
       return labels;
     }
-    function commitForm() {
-      if (selected >= 0) boxes[selected].标签 = formLabel();
+
+    function makeCropReviewer(prefix, api, formRender, formValue, payloadKey) {
+      return {
+        record: null, index: 0, count: 0, scope: "pending",
+        async load(index) {
+          let value;
+          try { value = await request(`/api/${api}/record?index=${index}&scope=${this.scope}`); }
+          catch (error) {
+            if (String(error.message).includes("没有待") || String(error.message).includes("还没有已保存")) { this.done(); return; }
+            throw error;
+          }
+          this.record = value; this.index = value.index; this.count = value.count;
+          byId(`${prefix}-pos`).value = this.index + 1; byId(`${prefix}-pos`).max = this.count;
+          byId(`${prefix}-count`).textContent = `/ ${this.count}`;
+          byId(`${prefix}-sample`).textContent = value.annotation.id;
+          byId(`${prefix}-exclude`).style.display = this.scope === "saved" ? "none" : "";
+          const img = byId(`${prefix}-img`);
+          img.src = api === "mask"
+            ? `/api/mask/crop?id=${encodeURIComponent(value.annotation.id)}&t=${Date.now()}`
+            : `/api/attribute/image?id=${encodeURIComponent(value.image.id)}&t=${Date.now()}`;
+          byId(`${prefix}-form`).innerHTML = formRender(value);
+          for (const id of [`${prefix}-prev`,`${prefix}-next`,`${prefix}-save`,`${prefix}-exclude`,`${prefix}-pos`]) byId(id).disabled = false;
+          setMessage(""); refreshSummary();
+        },
+        async save() {
+          if (!this.record) throw new Error("没有待核对裁剪");
+          const body = payloadKey === "attributes"
+            ? {image_id: this.record.image.id, attributes: formValue()}
+            : {annotation_id: this.record.annotation.id, category_id: Number(formValue())};
+          const value = await post(`/api/${api}/save`, body);
+          setMessage(value.updated ? "已更新金标准记录" : "已保存到金标准");
+          await refreshSummary();
+        },
+        async saveAndLoad(target) {
+          try { await this.save(); await this.load(Math.max(0, target)); }
+          catch (error) {
+            if (String(error.message).includes("没有待") || String(error.message).includes("还没有已保存")) this.done();
+            else setMessage(error.message, true);
+          }
+        },
+        nextTarget() { return this.scope === "saved" ? this.index + 1 : this.index; },
+        goSave() { this.saveAndLoad(this.nextTarget()); },
+        goNext() { this.saveAndLoad(this.nextTarget()); },
+        goPrev() { this.saveAndLoad(Math.max(0, this.index - 1)); },
+        goJump() {
+          const target = Math.max(0, Number(byId(`${prefix}-pos`).value) - 1);
+          this.saveAndLoad(this.scope === "saved" ? target : (target > this.index ? target - 1 : target));
+        },
+        async exclude() {
+          if (!this.record || !confirm("该裁剪将从候选队列排除，不进入金标准。继续？")) return;
+          const body = payloadKey === "attributes"
+            ? {image_id: this.record.image.id} : {annotation_id: this.record.annotation.id};
+          try { await post(`/api/${api}/exclude`, body); await this.load(this.index); }
+          catch (error) {
+            if (String(error.message).includes("没有待")) this.done();
+            else setMessage(error.message, true);
+          }
+        },
+        done() {
+          this.record = null; this.count = 0;
+          byId(`${prefix}-pos`).value = 0; byId(`${prefix}-count`).textContent = "/ 0";
+          byId(`${prefix}-form`).innerHTML = `<div class="empty">${this.scope === "saved" ? "没有已保存的记录。" : "本环节已全部核对完成。"}</div>`;
+          byId(`${prefix}-img`).removeAttribute("src");
+          for (const id of [`${prefix}-prev`,`${prefix}-next`,`${prefix}-save`,`${prefix}-exclude`,`${prefix}-pos`]) byId(id).disabled = true;
+          setMessage("本环节已完成"); refreshSummary();
+        },
+      };
     }
-    async function request(url, options) {
-      const response = await fetch(url, options), value = await response.json();
-      if (!response.ok) throw new Error(value.error || response.statusText);
-      return value;
+
+    const Attribute = makeCropReviewer("attr", "attribute",
+      value => bodyForm(value.annotation.attributes), attributeFormValue, "attributes");
+    const MaskReview = makeCropReviewer("mask", "mask",
+      value => `<fieldset><legend>口罩</legend>${radio("mask", "1", "未佩戴", value.annotation.category_id === 1)}${radio("mask", "2", "佩戴", value.annotation.category_id === 2)}</fieldset>`,
+      () => selectedValue("mask"), "category_id");
+
+    for (const [reviewer, prefix] of [[Attribute, "attr"], [MaskReview, "mask"]]) {
+      byId(`${prefix}-save`).onclick = () => reviewer.goSave();
+      byId(`${prefix}-next`).onclick = () => reviewer.goNext();
+      byId(`${prefix}-prev`).onclick = () => reviewer.goPrev();
+      byId(`${prefix}-pos`).onchange = () => reviewer.goJump();
+      byId(`${prefix}-exclude`).onclick = () => reviewer.exclude();
     }
-    async function refreshSummary() {
-      const value = await request("/api/summary");
-      byId("tab-attribute").textContent = `属性核对 ${value.属性.待核对}/${value.属性.已保存}`;
-      byId("tab-mask").textContent = `口罩核对 ${value.口罩.待核对}/${value.口罩.已保存}`;
+    // 「待核对 / 回改已保存」切换：已保存队列按最近保存在前排列。
+    for (const [reviewer, prefix] of [[Detection, "det"], [Attribute, "attr"], [MaskReview, "mask"]]) {
+      const setScope = scope => {
+        if (reviewer.scope === scope) return;
+        reviewer.scope = scope;
+        byId(`${prefix}-scope-pending`).classList.toggle("active", scope === "pending");
+        byId(`${prefix}-scope-saved`).classList.toggle("active", scope === "saved");
+        reviewer.load(0).catch(error => setMessage(error.message, true));
+      };
+      byId(`${prefix}-scope-pending`).onclick = () => setScope("pending");
+      byId(`${prefix}-scope-saved`).onclick = () => setScope("saved");
     }
-    async function load() {
-      let value;
+    byId("attr-context").onclick = () => {
+      if (!Attribute.record) return;
+      byId("context-img").src = `/api/attribute/context?id=${encodeURIComponent(Attribute.record.image.id)}&t=${Date.now()}`;
+      byId("context-overlay").style.display = "flex";
+    };
+    byId("context-overlay").onclick = () => { byId("context-overlay").style.display = "none"; };
+
+    // ---------- 阶段四：尘土化 ----------
+    function augmentParams() {
+      return {
+        stage: byId("aug-stage").value,
+        variants: Number(byId("aug-variants").value),
+        intensity: Number(byId("aug-intensity").value),
+        seed: Number(byId("aug-seed").value),
+        dust: byId("eff-dust").checked, yellow: byId("eff-yellow").checked,
+        low_light: byId("eff-low_light").checked, blur: byId("eff-blur").checked,
+        noise: byId("eff-noise").checked, jpeg: byId("eff-jpeg").checked,
+      };
+    }
+    function augmentQuery() {
+      const p = augmentParams();
+      const flags = ["dust","yellow","low_light","blur","noise","jpeg"].map(k => `${k}=${p[k] ? 1 : 0}`).join("&");
+      return `stage=${p.stage}&variants=${p.variants}&intensity=${p.intensity}&seed=${p.seed}&${flags}`;
+    }
+    byId("aug-intensity").oninput = () => byId("aug-intensity-v").textContent = Number(byId("aug-intensity").value).toFixed(1);
+    byId("aug-preview").onclick = async () => {
+      const grid = byId("aug-preview-grid");
+      grid.innerHTML = '<div class="empty">正在生成预览…</div>';
       try {
-        value = await request(`/api/record?section=${encodeURIComponent(section)}&index=${index}`);
-      } catch(error) {
-        if(String(error.message).includes("没有待核对原图")){showDone();return;}
-        throw error;
+        const value = await request(`/api/augment/preview?${augmentQuery()}`);
+        grid.innerHTML = value.samples.map(pair =>
+          `<div class="preview-pair"><div><img src="${pair.before}"><div class="cap">原图</div></div><div><img src="${pair.after}"><div class="cap">增强</div></div></div>`
+        ).join("");
+      } catch (error) { grid.innerHTML = `<div class="empty">${error.message}</div>`; }
+    };
+    let augmentTimer = null;
+    byId("aug-run").onclick = async () => {
+      if (!confirm("将重建该环节的整个增强集（4_augmented/），继续？")) return;
+      const p = augmentParams();
+      const {stage, ...params} = p;
+      try {
+        await post("/api/augment/run", {stage, params});
+        byId("aug-progress-wrap").hidden = false;
+        byId("aug-result").textContent = "";
+        augmentTimer = setInterval(pollAugment, 800);
+      } catch (error) { setMessage(error.message, true); }
+    };
+    async function pollAugment() {
+      try {
+        const status = await request("/api/augment/status");
+        if (status.total) {
+          byId("aug-progress").max = status.total;
+          byId("aug-progress").value = status.done;
+          byId("aug-progress-text").textContent = `${status.stage}: ${status.done} / ${status.total}`;
+        }
+        if (!status.running) {
+          clearInterval(augmentTimer);
+          if (status.error) byId("aug-result").textContent = `失败: ${status.error}`;
+          else if (status.summary) {
+            byId("aug-result").textContent =
+              `完成: ${status.summary.增强图片} 张增强图 / ${status.summary.增强标注} 条标注（其中训练集 ${status.summary.其中训练集标注} 条）`;
+            refreshSummary();
+          }
+        }
+      } catch (error) { clearInterval(augmentTimer); setMessage(error.message, true); }
+    }
+
+    // ---------- 快捷键 ----------
+    // Q/E 或 ←/→ 保存并切换上一张/下一张；Ctrl+S 或 Enter 保存；
+    // 目标识别页：A/D 切换框，N 新增框，Delete 删除框；口罩页：1/2 选未佩戴/佩戴。
+    addEventListener("keydown", event => {
+      const tag = event.target.tagName;
+      const textInput = tag === "SELECT" || tag === "TEXTAREA" ||
+        (tag === "INPUT" && !["checkbox", "radio", "range", "button", "hidden"].includes(event.target.type));
+      if (textInput) return;
+      const active = tab === "detection" ? Detection : tab === "attribute" ? Attribute : tab === "mask" ? MaskReview : null;
+      if (!active) return;
+      const key = event.key.toLowerCase();
+      if (event.ctrlKey && key === "s") { event.preventDefault(); active.goSave(); }
+      else if (key === "enter" && !event.ctrlKey) { event.preventDefault(); active.goSave(); }
+      else if (key === "e" || event.key === "ArrowRight") active.goNext();
+      else if (key === "q" || event.key === "ArrowLeft") active.goPrev();
+      else if (tab === "detection" && key === "a") Detection.cycleBox(-1);
+      else if (tab === "detection" && key === "d") Detection.cycleBox(1);
+      else if (tab === "detection" && key === "n") byId("det-add").click();
+      else if (tab === "detection" && event.key === "Delete") byId("det-del").click();
+      else if (tab === "mask" && (key === "1" || key === "2")) {
+        const input = document.querySelector(`input[name="mask"][value="${key}"]`);
+        if (input) input.checked = true;
       }
-      record = value.record; count = value.count; index = value.index;
-      boxes = structuredClone(record.框); selected = boxes.length ? 0 : -1; addMode = false;
-      ["previous","next","save","exclude","add-box","position"].forEach(id=>byId(id).disabled=false);
-      byId("position").value = index + 1; byId("position").max = count; byId("count").textContent = `/ ${count}`;
-      byId("sample-id").textContent = record.id; byId("add-box").classList.remove("active");
-      await loadImage(); renderForm(); setMessage(""); await refreshSummary();
-    }
-    function loadImage() {
-      return new Promise((resolve, reject) => {
-        image = new Image();
-        image.onload = () => { resizeCanvas(); resolve(); };
-        image.onerror = reject;
-        image.src = `/api/image?section=${encodeURIComponent(section)}&index=${index}&t=${Date.now()}`;
-      });
-    }
-    function resizeCanvas() {
-      const canvas = byId("full"), available = canvas.parentElement.clientWidth;
-      scale = Math.min(1, available / image.naturalWidth);
-      canvas.width = Math.round(image.naturalWidth * scale); canvas.height = Math.round(image.naturalHeight * scale);
-      draw();
-    }
-    function draw() {
-      const canvas = byId("full"), context = canvas.getContext("2d");
-      context.clearRect(0,0,canvas.width,canvas.height); context.drawImage(image,0,0,canvas.width,canvas.height);
-      boxes.forEach((item, i) => {
-        const [x1,y1,x2,y2] = item.框.map(v => v*scale), active = i === selected;
-        context.strokeStyle = active ? "#ff2d2d" : "#ff9f1a"; context.lineWidth = active ? 3 : 2;
-        context.strokeRect(x1,y1,x2-x1,y2-y1);
-        context.fillStyle = context.strokeStyle; context.font = "bold 14px system-ui"; context.fillText(String(i+1),x1+4,y1+16);
-        if (active) for (const [x,y] of [[x1,y1],[x2,y1],[x1,y2],[x2,y2]]) { context.fillRect(x-5,y-5,10,10); }
-      });
-    }
-    function renderForm() {
-      byId("box-position").textContent = `框 ${selected < 0 ? 0 : selected+1} / ${boxes.length}`;
-      byId("box-id").textContent = selected < 0 ? "" : boxes[selected].id;
-      byId("delete-box").disabled = selected < 0;
-      byId("previous-box").disabled = boxes.length < 2;
-      byId("next-box").disabled = boxes.length < 2;
-      byId("form").innerHTML = selected < 0 ? '<div class="empty">当前整图没有框；可新增，或直接保存为检测负样本。</div>' : section === "属性" ? bodyForm(boxes[selected].标签) : maskForm(boxes[selected].标签);
-      draw();
-    }
-    function point(event) {
-      const rect = byId("full").getBoundingClientRect();
-      return [(event.clientX-rect.left)*byId("full").width/rect.width/scale,(event.clientY-rect.top)*byId("full").height/rect.height/scale];
-    }
-    function hit(x,y) {
-      const tolerance = 10/scale;
-      for (let i=boxes.length-1;i>=0;i--) {
-        const [x1,y1,x2,y2]=boxes[i].框;
-        const corners=[[x1,y1,"nw"],[x2,y1,"ne"],[x1,y2,"sw"],[x2,y2,"se"]];
-        for (const [cx,cy,corner] of corners) if (Math.abs(x-cx)<=tolerance && Math.abs(y-cy)<=tolerance) return {index:i,mode:"resize",corner};
-        if (x>=x1&&x<=x2&&y>=y1&&y<=y2) return {index:i,mode:"move"};
-      }
-      return null;
-    }
-    byId("full").addEventListener("pointerdown", event => {
-      const [x,y]=point(event); byId("full").setPointerCapture(event.pointerId);
-      // 框编辑阶段允许多个新增空框；必选标签只在保存整图时统一校验。
-      if(selected>=0)try{commitForm();}catch(_){}
-      if (addMode) { interaction={mode:"add",start:[x,y]}; boxes.push({id:`${record.id}_new_${Date.now()}_${serial++}`,框:[x,y,x+1,y+1],标签:null}); selected=boxes.length-1; renderForm(); return; }
-      const found=hit(x,y); if(!found){selected=-1;renderForm();return;}
-      selected=found.index; interaction={...found,start:[x,y],original:[...boxes[selected].框]}; renderForm();
     });
-    byId("full").addEventListener("pointermove", event => {
-      if(!interaction)return; const [x,y]=point(event), width=image.naturalWidth, height=image.naturalHeight;
-      if(interaction.mode==="add") boxes[selected].框=[Math.max(0,Math.min(interaction.start[0],x)),Math.max(0,Math.min(interaction.start[1],y)),Math.min(width,Math.max(interaction.start[0],x)),Math.min(height,Math.max(interaction.start[1],y))];
-      else if(interaction.mode==="move") { const dx=x-interaction.start[0],dy=y-interaction.start[1],[x1,y1,x2,y2]=interaction.original,w=x2-x1,h=y2-y1,nx=Math.max(0,Math.min(width-w,x1+dx)),ny=Math.max(0,Math.min(height-h,y1+dy)); boxes[selected].框=[nx,ny,nx+w,ny+h]; }
-      else { let [x1,y1,x2,y2]=interaction.original; if(interaction.corner.includes("w"))x1=Math.min(x,x2-4);if(interaction.corner.includes("e"))x2=Math.max(x,x1+4);if(interaction.corner.includes("n"))y1=Math.min(y,y2-4);if(interaction.corner.includes("s"))y2=Math.max(y,y1+4);boxes[selected].框=[Math.max(0,x1),Math.max(0,y1),Math.min(width,x2),Math.min(height,y2)]; }
-      draw();
-    });
-    function finishInteraction() {
-      if(interaction?.mode==="add") {
-        addMode=false; byId("add-box").classList.remove("active"); setMessage(""); renderForm();
-      }
-      interaction=null;
-    }
-    byId("full").addEventListener("pointerup", finishInteraction);
-    byId("full").addEventListener("pointercancel", finishInteraction);
-    byId("full").addEventListener("lostpointercapture", finishInteraction);
-    function payloadBoxes(){ commitForm(); return boxes.map(item=>({id:item.id,框:item.框.map(Math.round),标签:item.标签})); }
-    async function saveCurrent() {
-      if(!record) throw new Error("本栏没有待核对原图");
-      const value=await request("/api/review",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({section,id:record.id,"框":payloadBoxes()})});
-      setMessage("整图已进入人工金标准"); await refreshSummary(); return value;
-    }
-    async function saveAndLoad(targetIndex) { try { await saveCurrent(); index=Math.max(0,targetIndex); await load(); } catch(error) { if(String(error.message).includes("没有待核对原图")){showDone();} else {setMessage(error.message,true);throw error;} } }
-    function showDone(){record=null;boxes=[];selected=-1;count=0;byId("position").value=0;byId("count").textContent="/ 0";byId("form").innerHTML='<div class="empty">本栏已经全部核对完成。</div>';["previous","next","save","exclude","add-box","delete-box","previous-box","next-box","position"].forEach(id=>byId(id).disabled=true);const c=byId("full"),ctx=c.getContext("2d");ctx.clearRect(0,0,c.width,c.height);setMessage("本栏已完成");refreshSummary();}
-    function setMessage(text,error=false){byId("message").textContent=text;byId("message").style.color=error?"#ff8585":"#8bd3a7";}
-    async function switchSection(next){if(next===section)return;try{if(record)await saveCurrent();section=next;index=0;byId("tab-attribute").classList.toggle("active",section==="属性");byId("tab-mask").classList.toggle("active",section==="口罩");await load();}catch(error){setMessage(error.message,true);}}
-    byId("tab-attribute").onclick=()=>switchSection("属性");byId("tab-mask").onclick=()=>switchSection("口罩");
-    byId("add-box").onclick=()=>{addMode=!addMode;byId("add-box").classList.toggle("active",addMode);setMessage(addMode?"请在原图拖出新框":"");};
-    byId("delete-box").onclick=()=>{if(selected<0)return;boxes.splice(selected,1);selected=Math.min(selected,boxes.length-1);renderForm();};
-    function selectBox(delta){if(!boxes.length)return;if(selected>=0)try{commitForm();}catch(_){}selected=(Math.max(0,selected)+delta+boxes.length)%boxes.length;renderForm();}
-    byId("previous-box").onclick=()=>selectBox(-1);byId("next-box").onclick=()=>selectBox(1);
-    byId("form").addEventListener("change",()=>{try{commitForm();setMessage("");}catch(_){}});
-    byId("save").onclick=async()=>{try{await saveAndLoad(index);}catch(_){}};
-    byId("next").onclick=async()=>{try{await saveAndLoad(index);}catch(_){}};
-    byId("previous").onclick=async()=>{try{await saveAndLoad(Math.max(0,index-1));}catch(_){}};
-    byId("position").onchange=async()=>{try{const target=Math.max(0,Number(byId("position").value)-1),adjusted=target>index?target-1:target;await saveAndLoad(adjusted);}catch(_){}};
-    byId("exclude").onclick=async()=>{if(!record||!confirm("整图将从候选队列排除，不进入人工金标准；原图不会删除。继续？"))return;try{await request("/api/candidate",{method:"DELETE",headers:{"Content-Type":"application/json"},body:JSON.stringify({section,id:record.id})});await load();}catch(error){if(String(error.message).includes("没有待核对原图"))showDone();else setMessage(error.message,true);}};
-    addEventListener("resize",()=>{if(image.complete&&image.naturalWidth)resizeCanvas();});
-    addEventListener("keydown",event=>{if(event.ctrlKey&&event.key.toLowerCase()==="s"){event.preventDefault();byId("save").click();}else if(!["INPUT","SELECT"].includes(event.target.tagName)&&event.key==="Delete")byId("delete-box").click();else if(!["INPUT","SELECT"].includes(event.target.tagName)&&event.key==="ArrowRight")byId("next").click();else if(!["INPUT","SELECT"].includes(event.target.tagName)&&event.key==="ArrowLeft")byId("previous").click();});
-    refreshSummary().then(load).catch(error=>setMessage(error.message,true));
+
+    refreshSummary().then(() => Detection.load(0)).catch(error => setMessage(error.message, true));
   </script>
 </body>
 </html>

@@ -1,0 +1,26 @@
+# Docker 构建上下文白名单：默认排除一切，只放行推理镜像所需文件。
+*
+
+# 推理端代码与元数据
+!inference/
+!models/
+inference/node_modules/
+inference/logs/
+inference/__pycache__/
+inference/result*.json
+inference/result*.xlsx
+
+# 模型目录里只保留部署权重（训练 checkpoint 不进镜像）
+models/*
+!models/finetuned/
+!models/vehicle/
+models/finetuned/*
+!models/finetuned/person_detector/
+!models/finetuned/person_attribute/
+!models/finetuned/face_mask/
+models/finetuned/person_attribute/*
+!models/finetuned/person_attribute/inference.json
+!models/finetuned/person_attribute/inference.pdiparams
+models/finetuned/face_mask/*
+!models/finetuned/face_mask/face_mask_detection.onnx
+!models/finetuned/face_mask/synset.txt

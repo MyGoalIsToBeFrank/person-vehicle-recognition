@@ -83,7 +83,8 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--vehicle-attribute-dir", help="临时覆盖车辆属性模型目录")
     parser.add_argument("--face-mask-dir", help="临时覆盖口罩模型目录")
     parser.add_argument("--plate-model-dir", help="临时覆盖车牌模型目录")
-    parser.add_argument("--result-json", help="临时覆盖 JSON 输出路径")
+    parser.add_argument("--result-json", help="临时覆盖 JSON 输出文件路径")
+    parser.add_argument("--output-dir", help="指定输出目录，自动在该目录写入 result.json")
     parser.add_argument("--device", choices=("CPU", "GPU"), help="临时覆盖推理设备")
     parser.add_argument("--limit", type=int, help="只处理排序后的前 N 张图片")
     return parser.parse_args()
@@ -143,7 +144,15 @@ def write_json_atomically(rows: list[dict[str, Any]], result_path: Path) -> None
 def main() -> int:
     args = parse_arguments()
     data_dir = resolve_override(args.data_dir, project_config.DATA_DIR)
-    result_path = resolve_override(args.result_json, project_config.RESULT_JSON)
+    if args.output_dir:
+        output_dir = (
+            Path(args.output_dir).resolve()
+            if Path(args.output_dir).is_absolute()
+            else (Path.cwd() / args.output_dir).resolve()
+        )
+        result_path = output_dir / "result.json"
+    else:
+        result_path = resolve_override(args.result_json, project_config.RESULT_JSON)
     device = (args.device or project_config.DEVICE).upper()
     if device not in {"CPU", "GPU"}:
         raise ValueError("device 只能是 CPU 或 GPU")
@@ -170,7 +179,6 @@ def main() -> int:
     print(f"加载模型: device={device}", flush=True)
     pipeline = RecognitionPipeline(
         device=device,
-        face_mask_sha256=project_config.FACE_MASK_SHA256,
         person_attribute_crop_scale=project_config.PERSON_ATTRIBUTE_CROP_SCALE,
         **model_paths,
     )
@@ -180,9 +188,13 @@ def main() -> int:
         started = time.perf_counter()
         content = pipeline.recognize(image_path)
         elapsed_ms = round((time.perf_counter() - started) * 1000.0, 3)
+        try:
+            stored_path = image_path.relative_to(data_dir).as_posix()
+        except ValueError:
+            stored_path = str(image_path)
         rows.append(
             {
-                "图片位置": str(image_path),
+                "图片位置": stored_path,
                 "处理耗时（毫秒）": elapsed_ms,
                 "识别内容": content,
             }

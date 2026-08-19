@@ -17,8 +17,19 @@ const python = existsSync(bundledPython) ? bundledPython : "python";
 const config = JSON.parse(
   execFileSync(python, [path.join(HERE, "config.py")], { encoding: "utf8" }),
 );
-const INPUT_PATH = config.RESULT_JSON;
-const OUTPUT_PATH = config.RESULT_XLSX;
+
+// 允许用命令行覆盖输入 JSON 和原图基目录，便于 Docker/CI 场景。
+function parseCliArg(flag) {
+  const token = process.argv.slice(2).find((arg) => arg.startsWith(`${flag}=`));
+  return token ? token.slice(flag.length + 1) : undefined;
+}
+const INPUT_PATH = parseCliArg("--result-json") || config.RESULT_JSON;
+const BASE_IMAGE_DIR = parseCliArg("--data-dir")
+  ? path.resolve(parseCliArg("--data-dir"))
+  : config.DATA_DIR;
+const OUTPUT_PATH = parseCliArg("--output-xlsx")
+  ? path.resolve(parseCliArg("--output-xlsx"))
+  : config.RESULT_XLSX;
 const THUMBNAIL_WIDTH_PX = 180;
 const THUMBNAIL_HEIGHT_PX = 120;
 
@@ -80,8 +91,11 @@ function resultRows(results) {
 
 
 async function thumbnailData(imagePath) {
+  const resolved = path.isAbsolute(imagePath)
+    ? imagePath
+    : path.join(BASE_IMAGE_DIR, imagePath);
   try {
-    const { data, info } = await sharp(imagePath)
+    const { data, info } = await sharp(resolved)
       .rotate()
       .resize({
         width: THUMBNAIL_WIDTH_PX,

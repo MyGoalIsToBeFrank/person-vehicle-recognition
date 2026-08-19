@@ -15,5 +15,5 @@ models/*
 **/__pycache__/
 *.py[cod]
 
-independent/result.json
-independent/result.xlsx
+inference/result.json
+inference/result.xlsx

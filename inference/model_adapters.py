@@ -1,8 +1,7 @@
-"""五类模型的薄适配层；这里只处理模型文件、张量和运行时。"""
+"""推理模型的薄适配层；这里只处理模型文件、张量和运行时。"""
 
 from __future__ import annotations
 
-import hashlib
 import importlib
 import os
 from dataclasses import dataclass
@@ -12,9 +11,6 @@ import cv2
 import numpy as np
 import onnxruntime as ort
 from paddle.inference import Config, create_predictor
-
-
-MASK_SHA256 = "ebe6674b727ba090fd94f394b81ca487d61f0f54fe1f48f2fa2443d9bd5fc280"
 
 
 @dataclass(frozen=True)
@@ -152,14 +148,10 @@ class FaceMaskModel:
         model_dir: Path,
         confidence: float = 0.5,
         iou: float = 0.45,
-        expected_sha256: str | None = MASK_SHA256,
     ):
         model_path = model_dir / "face_mask_detection.onnx"
         classes_path = model_dir / "synset.txt"
         _require_files([model_path, classes_path])
-        digest = hashlib.sha256(model_path.read_bytes()).hexdigest()
-        if expected_sha256 is not None and digest != expected_sha256:
-            raise ValueError(f"口罩模型 SHA-256 不匹配: {digest}")
         classes = [line.strip() for line in classes_path.read_text(encoding="utf-8").splitlines()]
         if classes != ["w/o mask", "w/ mask"]:
             raise ValueError(f"口罩类别文件内容异常: {classes}")
@@ -172,9 +164,10 @@ class FaceMaskModel:
         self.iou = iou
 
     def predict(self, crop: np.ndarray) -> str:
+        """二分类业务口径：检不到可靠口罩框一律归为未佩戴。"""
         detections = self.detect(crop)
         if not detections:
-            return "未识别"
+            return "未佩戴口罩"
         best = max(detections, key=lambda detection: detection.score)
         return "佩戴口罩" if best.class_id == 1 else "未佩戴口罩"
 

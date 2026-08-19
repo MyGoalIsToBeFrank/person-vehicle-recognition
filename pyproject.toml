@@ -1,7 +1,7 @@
 [project]
-name = "independent-structured-inference"
+name = "inference-structured-pipeline"
 version = "0.1.0"
-description = "Independent person and vehicle structured inference"
+description = "Inference-side person and vehicle structured recognition pipeline"
 requires-python = ">=3.10,<3.11"
 dependencies = [
   "paddlepaddle-gpu==3.3.0",

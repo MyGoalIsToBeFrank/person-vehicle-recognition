@@ -1,4 +1,4 @@
-"""项目的唯一日常配置入口。
+"""inference 推理应用端的唯一日常配置入口，训练侧脚本也共用其中的路径。
 
 所有相对目录都在这里先解析成绝对路径。切换微调前后的模型时，只需要修改
 ``PERSON_DETECTOR_DIR``、``PERSON_ATTRIBUTE_DIR`` 和 ``FACE_MASK_DIR``。
@@ -27,31 +27,39 @@ INFERENCE_VENV_DIR = PROJECT_ROOT / ".venv"
 
 # 每个模型单独配置，避免为了替换一个微调模型而复制整套 models 目录。
 MODEL_DIR = PROJECT_ROOT / "models"
-PERSON_DETECTOR_DIR = MODEL_DIR / "human/mot_ppyoloe_s_36e_pipeline"
-PERSON_ATTRIBUTE_DIR = MODEL_DIR / "human/PPHGNet_small_person_attribute_954_infer"
+PERSON_DETECTOR_DIR = MODEL_DIR / "finetuned/person_detector"
+PERSON_ATTRIBUTE_DIR = MODEL_DIR / "finetuned/person_attribute"
 VEHICLE_DETECTOR_DIR = MODEL_DIR / "vehicle/mot_ppyoloe_s_36e_ppvehicle"
 VEHICLE_ATTRIBUTE_DIR = MODEL_DIR / "vehicle/vehicle_attribute_model"
-FACE_MASK_DIR = MODEL_DIR / "face_mask_yolov5"
+FACE_MASK_DIR = MODEL_DIR / "finetuned/face_mask"
 PLATE_MODEL_DIR = MODEL_DIR / "vehicle"
 
 # 官网属性模型沿用旧工作流的 1.3 倍人物裁剪；微调模型按 WebUI 最终红框训练，切换时设 1.0。
-PERSON_ATTRIBUTE_CROP_SCALE = 1.3
+PERSON_ATTRIBUTE_CROP_SCALE = 1.0
 
-# 原口罩权重必须校验；切换到微调模型时填写新 ONNX 的 SHA-256。
-FACE_MASK_SHA256: str | None = (
-    "ebe6674b727ba090fd94f394b81ca487d61f0f54fe1f48f2fa2443d9bd5fc280"
-)
-
-# 数据准备、人工复核和训练共用这些路径。
+# 数据准备、人工复核和训练共用这些路径。processed 下按管线阶段编号：
+# 1_detection 目标识别 → 2_attribute 属性标注 → 3_mask 口罩标注 → 4_augmented 尘土化
+# → 5_export 训练导出。所有 JSON 均为 COCO 风格（images/annotations/categories）。
 DATASET_ROOT = PROJECT_ROOT / "dataset"
 RAW_DATA_DIR = DATASET_ROOT / "raw"
 PROCESSED_DATA_DIR = DATASET_ROOT / "processed"
-LEGACY_LABELS_PATH = PROCESSED_DATA_DIR / "labels.json"
-CANDIDATES_PATH = PROCESSED_DATA_DIR / "candidates.json"
-GOLD_LABELS_PATH = PROCESSED_DATA_DIR / "gold_labels.json"
-GOLD_IMAGES_DIR = PROCESSED_DATA_DIR / "gold_images"
-CANDIDATE_ARCHIVE_DIR = DATASET_ROOT / "candidate_archives"
-PERSON_DETECTION_COCO_DIR = PROCESSED_DATA_DIR / "person_detection_coco"
+
+DETECTION_DATA_DIR = PROCESSED_DATA_DIR / "1_detection"
+DETECTION_CANDIDATES_PATH = DETECTION_DATA_DIR / "candidates.json"
+DETECTION_CONFIRMED_PATH = DETECTION_DATA_DIR / "confirmed.json"
+
+ATTRIBUTE_DATA_DIR = PROCESSED_DATA_DIR / "2_attribute"
+ATTRIBUTE_IMAGES_DIR = ATTRIBUTE_DATA_DIR / "images"
+ATTRIBUTE_CANDIDATES_PATH = ATTRIBUTE_DATA_DIR / "candidates.json"
+ATTRIBUTE_GOLD_PATH = ATTRIBUTE_DATA_DIR / "gold.json"
+
+MASK_DATA_DIR = PROCESSED_DATA_DIR / "3_mask"
+MASK_IMAGES_DIR = MASK_DATA_DIR / "images"
+MASK_CANDIDATES_PATH = MASK_DATA_DIR / "candidates.json"
+MASK_GOLD_PATH = MASK_DATA_DIR / "gold.json"
+
+AUGMENTED_DATA_DIR = PROCESSED_DATA_DIR / "4_augmented"
+PERSON_DETECTION_COCO_DIR = PROCESSED_DATA_DIR / "5_export/person_detection_coco"
 TRAINING_OUTPUT_DIR = PROJECT_ROOT / "models/finetuned"
 TRAINING_VENV_DIR = PROJECT_ROOT / ".venv-train"
 TORCH_PACKAGE_DIR = PROJECT_ROOT / ".torch-cu130"
@@ -83,44 +91,11 @@ def configure_runtime_dlls(environment_dir: Path) -> list[object]:
 
 
 def exported_paths() -> dict[str, str]:
-    """返回供 Python 入口和 Excel 导出共同读取的扁平配置。"""
-    names = (
-        "PROJECT_ROOT",
-        "DATA_DIR",
-        "DEVICE",
-        "RESULT_JSON",
-        "RESULT_XLSX",
-        "INFERENCE_VENV_DIR",
-        "MODEL_DIR",
-        "PERSON_DETECTOR_DIR",
-        "PERSON_ATTRIBUTE_DIR",
-        "VEHICLE_DETECTOR_DIR",
-        "VEHICLE_ATTRIBUTE_DIR",
-        "FACE_MASK_DIR",
-        "PLATE_MODEL_DIR",
-        "PERSON_ATTRIBUTE_CROP_SCALE",
-        "FACE_MASK_SHA256",
-        "DATASET_ROOT",
-        "RAW_DATA_DIR",
-        "PROCESSED_DATA_DIR",
-        "LEGACY_LABELS_PATH",
-        "CANDIDATES_PATH",
-        "GOLD_LABELS_PATH",
-        "GOLD_IMAGES_DIR",
-        "CANDIDATE_ARCHIVE_DIR",
-        "PERSON_DETECTION_COCO_DIR",
-        "TRAINING_OUTPUT_DIR",
-        "TRAINING_VENV_DIR",
-        "TORCH_PACKAGE_DIR",
-        "PADDLECLAS_DIR",
-        "YOLOV5_DIR",
-        "PADDLEDETECTION_DIR",
-        "PERSON_DETECTOR_TRAINING_WEIGHTS",
-    )
-    values = globals()
+    """导出 Node Excel 工具实际消费的路径（DATA_DIR 用于解析相对图片位置）。"""
     return {
-        name: str(values[name]) if isinstance(values[name], Path) else values[name]
-        for name in names
+        "DATA_DIR": str(DATA_DIR),
+        "RESULT_JSON": str(RESULT_JSON),
+        "RESULT_XLSX": str(RESULT_XLSX),
     }
 
 

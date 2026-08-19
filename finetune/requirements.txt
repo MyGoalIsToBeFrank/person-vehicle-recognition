@@ -1,4 +1,4 @@
-# 独立训练环境；现有 independent 推理环境不安装这些依赖。
+# 独立训练环境；现有 inference 推理环境不安装这些依赖。
 onnx>=1.16,<2
 onnxruntime>=1.23,<2
 numpy<2

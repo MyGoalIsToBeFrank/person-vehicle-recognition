@@ -1,8 +1,9 @@
 # 数据源清单
 
 本项目只在内部研发范围内使用这些数据。原始压缩包和解压图片位于 `raw/`，
-程序不会修改它们；模型候选写入 `processed/candidates.json`，人工保存的最终结果只写入
-`processed/gold_labels.json` 和 `processed/gold_images/`。只有后两者参与训练。
+程序不会修改它们；所有中间产物按管线阶段写入 `processed/1_detection/` 至
+`processed/5_export/`（布局见根目录 README.md），旧版遗留数据归档在
+`processed/_legacy/`。只有人工确认的 gold/confirmed 与 `4_augmented/` 参与训练。
 
 | 数据集 | 本项目用途 | 官方来源 | 当前状态 |
 |---|---|---|---|

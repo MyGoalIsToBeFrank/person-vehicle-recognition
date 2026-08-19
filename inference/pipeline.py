@@ -12,7 +12,6 @@ import numpy as np
 from model_adapters import (
     Detection,
     FaceMaskModel,
-    MASK_SHA256,
     PaddleAttributeModel,
     PaddleDetector,
     PlateRecognizer,
@@ -84,38 +83,17 @@ class VehicleResult:
 class RecognitionPipeline:
     def __init__(
         self,
-        model_dir: Path | None = None,
-        device: str = "CPU",
         *,
-        person_detector_dir: Path | None = None,
-        person_attribute_dir: Path | None = None,
-        vehicle_detector_dir: Path | None = None,
-        vehicle_attribute_dir: Path | None = None,
-        face_mask_dir: Path | None = None,
-        plate_model_dir: Path | None = None,
-        face_mask_sha256: str | None = MASK_SHA256,
-        person_attribute_crop_scale: float = 1.3,
+        device: str,
+        person_detector_dir: Path,
+        person_attribute_dir: Path,
+        vehicle_detector_dir: Path,
+        vehicle_attribute_dir: Path,
+        face_mask_dir: Path,
+        plate_model_dir: Path,
+        person_attribute_crop_scale: float,
     ):
-        """加载显式模型路径；保留旧的 ``model_dir`` 调用方式。"""
-        if model_dir is not None:
-            model_dir = model_dir.resolve()
-            person_detector_dir = person_detector_dir or model_dir / "human/mot_ppyoloe_s_36e_pipeline"
-            person_attribute_dir = person_attribute_dir or model_dir / "human/PPHGNet_small_person_attribute_954_infer"
-            vehicle_detector_dir = vehicle_detector_dir or model_dir / "vehicle/mot_ppyoloe_s_36e_ppvehicle"
-            vehicle_attribute_dir = vehicle_attribute_dir or model_dir / "vehicle/vehicle_attribute_model"
-            face_mask_dir = face_mask_dir or model_dir / "face_mask_yolov5"
-            plate_model_dir = plate_model_dir or model_dir / "vehicle"
-        required = {
-            "person_detector_dir": person_detector_dir,
-            "person_attribute_dir": person_attribute_dir,
-            "vehicle_detector_dir": vehicle_detector_dir,
-            "vehicle_attribute_dir": vehicle_attribute_dir,
-            "face_mask_dir": face_mask_dir,
-            "plate_model_dir": plate_model_dir,
-        }
-        missing = [name for name, path in required.items() if path is None]
-        if missing:
-            raise ValueError(f"缺少模型目录配置: {missing}")
+        """从唯一配置入口传入全部模型路径，不推断隐含目录。"""
         if person_attribute_crop_scale < 1.0:
             raise ValueError("person_attribute_crop_scale 不能小于 1.0")
 
@@ -139,7 +117,7 @@ class RecognitionPipeline:
         self.vehicle_attributes = PaddleAttributeModel(
             vehicle_model, vehicle_params, (256, 192), device
         )
-        self.face_mask = FaceMaskModel(face_mask_dir, expected_sha256=face_mask_sha256)
+        self.face_mask = FaceMaskModel(face_mask_dir)
         self.plate = PlateRecognizer(plate_model_dir)
         self.person_attribute_crop_scale = person_attribute_crop_scale
 
@@ -155,7 +133,7 @@ class RecognitionPipeline:
                 continue
             attributes = decode_person_attributes(self.person_attributes.predict(body))
             head = self._upper_crop(image, detection.box, 0.40)
-            attributes["口罩"] = self.face_mask.predict(head) if head is not None else "未识别"
+            attributes["口罩"] = self.face_mask.predict(head) if head is not None else "未佩戴口罩"
             persons.append(attributes)
 
         vehicles: list[VehicleResult] = []

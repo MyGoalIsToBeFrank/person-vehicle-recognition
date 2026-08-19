@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-"""只读取人工 gold_labels.json，基于当前口罩 ONNX 权重微调 YOLOv5s。"""
+"""读取 3_mask/gold.json（及 4_augmented/mask 训练划分），微调 YOLOv5s 口罩模型。"""
 
 from __future__ import annotations
 
 import argparse
 import copy
-import hashlib
 import os
 import random
 import sys
@@ -14,7 +13,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 PROJECT_ROOT = HERE.parent
-sys.path.insert(0, str(PROJECT_ROOT / "independent"))
+sys.path.insert(0, str(PROJECT_ROOT / "inference"))
 sys.path.insert(0, str(HERE))
 
 import config  # noqa: E402
@@ -28,8 +27,13 @@ import torch  # noqa: E402
 import yaml  # noqa: E402
 
 _DLL_HANDLES = config.configure_runtime_dlls(config.TRAINING_VENV_DIR)
-from business_degradation import business_degradation  # noqa: E402
-from dataset_schema import flatten_gold, load_gold, resolved_path  # noqa: E402
+from dataset_schema import (  # noqa: E402
+    flatten_annotations,
+    load_dataset,
+    resolved_path,
+    split_name,
+    xywh_to_xyxy,
+)
 from mask_model import build_from_onnx  # noqa: E402
 
 
@@ -42,11 +46,6 @@ def arguments() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=20260813)
     parser.add_argument("--checkpoint", type=Path, help="继续微调此前保存的 best.pt/last.pt")
     return parser.parse_args()
-
-
-def split_name(full_image: str) -> str:
-    bucket = int(hashlib.sha1(full_image.encode("utf-8")).hexdigest()[:8], 16) % 10
-    return "test" if bucket == 0 else "val" if bucket == 1 else "train"
 
 
 def letterbox(image: np.ndarray, box: list[float]) -> tuple[np.ndarray, np.ndarray]:
@@ -77,34 +76,41 @@ def letterbox(image: np.ndarray, box: list[float]) -> tuple[np.ndarray, np.ndarr
 
 
 class MaskDataset(torch.utils.data.Dataset):
-    def __init__(self, records: list[dict], training: bool):
+    def __init__(self, records: list[dict]):
         self.records = records
-        self.training = training
+        # 人脸裁剪总量约百 MB 级，一次性解码进内存，避免每个 epoch 反复读盘解码。
+        # 不做任何在线增强，增强只来自离线尘土化副本。
+        self.cache: dict[int, np.ndarray] = {}
+        self.paths: dict[int, str] = {}
+        total_bytes = 0
+        for index, record in enumerate(records):
+            path = resolved_path(record["image"]["file_name"], config.PROJECT_ROOT)
+            image = cv2.imdecode(np.fromfile(path, dtype=np.uint8), cv2.IMREAD_COLOR)
+            if image is None:
+                raise ValueError(f"无法读取训练图片: {path}")
+            self.cache[index] = image
+            self.paths[index] = str(path)
+            total_bytes += image.nbytes
+        print(
+            f"口罩数据集预载 {len(self.cache)} 张到内存（{total_bytes / 2**20:.0f} MB）",
+            flush=True,
+        )
 
     def __len__(self) -> int:
         return len(self.records)
 
     def __getitem__(self, index: int):
         record = self.records[index]
-        path = resolved_path(record["图片"], config.PROJECT_ROOT)
-        image = cv2.imdecode(np.fromfile(path, dtype=np.uint8), cv2.IMREAD_COLOR)
-        if image is None:
-            raise ValueError(f"无法读取训练图片: {path}")
-        box = list(map(float, record["训练框"]))
-        if self.training:
-            image = business_degradation(image)
-            if random.random() < 0.5:
-                image = cv2.flip(image, 1)
-                width = image.shape[1]
-                box[0], box[2] = width - box[2], width - box[0]
+        image = self.cache[index]
+        box = [float(v) for v in xywh_to_xyxy(record["bbox"])]
         image, yolo_box = letterbox(image, box)
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB).transpose(2, 0, 1)
         # 保持 YOLOv5 DataLoader 的 uint8 协议；训练循环和官方 val.run 各自只归一化一次。
         image_tensor = torch.from_numpy(np.ascontiguousarray(image))
-        class_id = 1.0 if record["标签"] == "w/ mask" else 0.0
+        class_id = 1.0 if record["category_id"] == 2 else 0.0
         target = torch.tensor([[0.0, class_id, *yolo_box.tolist()]], dtype=torch.float32)
         shapes = ((640, 640), ((1.0, 1.0), (0.0, 0.0)))
-        return image_tensor, target, str(path), shapes
+        return image_tensor, target, self.paths[index], shapes
 
 
 def collate(batch):
@@ -155,8 +161,6 @@ def export_onnx(model, output_dir: Path, device: torch.device) -> Path:
     session = ort.InferenceSession(str(output_path), providers=["CPUExecutionProvider"])
     if session.get_outputs()[0].shape != [1, 25200, 7]:
         raise RuntimeError(f"导出的 ONNX 输出协议错误: {session.get_outputs()[0].shape}")
-    digest = hashlib.sha256(output_path.read_bytes()).hexdigest()
-    (output_dir / "SHA256.txt").write_text(f"{digest}  {output_path.name}\n", encoding="ascii")
     return output_path
 
 
@@ -172,10 +176,18 @@ def main() -> int:
     if args.device == "GPU" and not use_cuda:
         raise RuntimeError("配置要求 GPU，但 PyTorch CUDA 当前不可用")
 
-    gold = load_gold(config.GOLD_LABELS_PATH)
-    records = flatten_gold(gold, "口罩")
-    train_records = [row for row in records if split_name(row["全图"]) == "train"]
-    val_records = [row for row in records if split_name(row["全图"]) == "val"]
+    gold = load_dataset(config.MASK_GOLD_PATH, "mask", "human", gold=True)
+    records = flatten_annotations(gold)
+    augmented_path = config.AUGMENTED_DATA_DIR / "mask/annotations.json"
+    if augmented_path.is_file():
+        augmented = load_dataset(augmented_path, "mask", "augmented", gold=True)
+        records += [
+            row
+            for row in flatten_annotations(augmented)
+            if split_name(row["image"]["source_image_id"]) == "train"
+        ]
+    train_records = [row for row in records if split_name(row["image"]["source_image_id"]) == "train"]
+    val_records = [row for row in records if split_name(row["image"]["source_image_id"]) == "val"]
     if not train_records or not val_records:
         raise ValueError(f"训练/验证样本不足: train={len(train_records)}, val={len(val_records)}")
 
@@ -184,7 +196,7 @@ def main() -> int:
     from val import run as validate
 
     model = build_from_onnx(
-        config.FACE_MASK_DIR / "face_mask_detection.onnx",
+        config.MODEL_DIR / "face_mask_yolov5/face_mask_detection.onnx",
         config.YOLOV5_DIR,
         device,
     )
@@ -209,14 +221,14 @@ def main() -> int:
     compute_loss = ComputeLoss(model)
 
     train_loader = torch.utils.data.DataLoader(
-        MaskDataset(train_records, True),
+        MaskDataset(train_records),
         batch_size=args.batch_size,
         shuffle=True,
         num_workers=0,
         collate_fn=collate,
     )
     val_loader = torch.utils.data.DataLoader(
-        MaskDataset(val_records, False),
+        MaskDataset(val_records),
         batch_size=args.batch_size,
         shuffle=False,
         num_workers=0,
