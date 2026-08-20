@@ -123,7 +123,7 @@ python finetune/review_server.py --seed 42       # 固定随机出图顺序（�
 接口定义、字段示例、视频抽帧客户端用法见
 [**service/README.md**](service/README.md)；命令行批量用法与模型替换见
 [**inference/README.md**](inference/README.md)；Docker 部署与分享见
-[**deploy/DOCKER.md**](deploy/DOCKER.md)。
+[**deploy/DOCKER_TUTORIAL.md**](deploy/DOCKER_TUTORIAL.md)。
 
 ```powershell
 # 命令行批量（本地直出）
@@ -172,7 +172,7 @@ dataset/
 finetune/                       # 微调侧：数据准备、标注 WebUI、训练、训练报告（见 finetune/README.md）
 inference/                      # 推理侧：识别管线本体，只读模型和图片（见 inference/README.md）
 service/                        # FastAPI 异步识别服务 + 视频抽帧客户端（见 service/README.md）
-deploy/                         # Docker 打包（Paddle GPU 镜像）与部署教学（见 deploy/DOCKER.md）
+deploy/                         # Docker 打包（Paddle GPU 镜像）与部署教学（见 deploy/DOCKER_TUTORIAL.md）
 models/                         # 全部模型权重（original + finetuned，来源见 MODEL_SOURCES.md）
 vendor/                         # PaddleClas / PaddleDetection / yolov5 源码（仅训练用）
 easy_test/                      # 推理测试图片
@@ -208,5 +208,5 @@ python3 -m venv .venv-train
 - `.torch-cu130/` 是本机 Windows 的手工 torch 目录，Linux/macOS 上删掉，正常 pip 安装即可。
 - macOS 无 CUDA，Paddle/torch 都走 CPU；口罩与车牌 ONNX 模型本来就只用 CPU。
 - 生产部署建议直接用 `deploy/` 下的 Dockerfile 构建 Paddle GPU 镜像（训练侧不进镜像），
-  详见 [deploy/DOCKER.md](deploy/DOCKER.md)；训练容器化时把 `dataset/` 和 `models/`
+  详见 [deploy/DOCKER_TUTORIAL.md](deploy/DOCKER_TUTORIAL.md)；训练容器化时把 `dataset/` 和 `models/`
   以卷挂载进容器（`raw` 可只读），代码无需改动。

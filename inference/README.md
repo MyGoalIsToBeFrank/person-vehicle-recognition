@@ -105,7 +105,7 @@ python inference/run.py --person-detector-dir models/finetuned/person_detector
 生产环境一般不直接调 `run.py`，而是用 `service/` 下的 FastAPI 异步服务：
 提交图片立即返回 `session_id`，凭它轮询获取结果（结果字段与本文件的
 `识别内容` 格式完全一致）。接口定义见 [`service/README.md`](../service/README.md)，
-Docker 部署见 [`deploy/DOCKER.md`](../deploy/DOCKER.md)。
+Docker 部署见 [`deploy/DOCKER_TUTORIAL.md`](../deploy/DOCKER_TUTORIAL.md)。
 
 ## 外部目录 / Docker 用法
 
@@ -125,6 +125,7 @@ python inference/run.py \
   `result.json`（优先于 `--result-json`）。
 - `--result-json` 仍保留，用于直接覆盖 JSON 文件路径。
 
-GPU 选项用于 Paddle 模型；当前口罩和车牌 ONNX 模型使用 CPU Execution Provider。
+GPU 选项用于 Paddle 模型；口罩与车牌 ONNX 模型在装有 onnxruntime-gpu 的环境（如 deploy/
+镜像）里走 CUDA，纯 CPU 环境自动回退 CPU。
 
 所有权重的上游地址、归档哈希、本地文件哈希和授权边界统一记录在 [`models/MODEL_SOURCES.md`](../models/MODEL_SOURCES.md) 及各权重目录的 `SOURCE.md` 中。

@@ -22,6 +22,8 @@ cd service
 | `DEVICE` | `GPU` | 推理设备，`GPU` / `CPU` |
 | `BACKLOG` | `512` | 队列硬上限，满则拒收（429） |
 | `MAX_KEPT` | `20000` | 内存中最多保留的结果数，超出按先进先出淘汰 |
+| `WORKERS` | `4` | 并行识别 worker 数，每个持有一套独立模型实例（显存约 WORKERS × 2GB） |
+| `BATCH_SIZE` | `8` | 每个 worker 单次最多攒多少张图做批量推理 |
 | `INFERENCE_RUN_IN_PLACE` | — | 置 `1` 时跳过 venv 切换（容器内置位） |
 
 Docker 部署见根目录 `deploy/`。

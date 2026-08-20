@@ -13,6 +13,13 @@ import onnxruntime as ort
 from paddle.inference import Config, create_predictor
 
 
+def _ort_providers() -> list[str]:
+    """容器内装 onnxruntime-gpu 时走 CUDA；纯 CPU 环境自动回退。"""
+    if "CUDAExecutionProvider" in ort.get_available_providers():
+        return ["CUDAExecutionProvider", "CPUExecutionProvider"]
+    return ["CPUExecutionProvider"]
+
+
 @dataclass(frozen=True)
 class Detection:
     score: float
@@ -80,38 +87,73 @@ class PaddleDetector:
         )
         self.threshold = threshold
 
-    def predict(self, image: np.ndarray) -> list[Detection]:
+    @staticmethod
+    def preprocess(image: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """整图 → (CHW float32 张量, scale_factor)。两个检测模型预处理完全相同，
+        批处理时由管线算一次共享。"""
         height, width = image.shape[:2]
         resized = cv2.resize(image, (640, 640), interpolation=cv2.INTER_CUBIC)
         rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
-        tensor = rgb.transpose(2, 0, 1)[None].astype(np.float32)
-        scale = np.asarray([[640.0 / height, 640.0 / width]], dtype=np.float32)
+        tensor = rgb.transpose(2, 0, 1).astype(np.float32)
+        scale = np.asarray([640.0 / height, 640.0 / width], dtype=np.float32)
+        return tensor, scale
+
+    def predict(self, image: np.ndarray) -> list[Detection]:
+        tensor, scale = self.preprocess(image)
+        return self.predict_prepped([tensor], [scale])[0]
+
+    def predict_prepped(
+        self,
+        tensors: list[np.ndarray],
+        scales: list[np.ndarray],
+    ) -> list[list[Detection]]:
+        """批量检测：N 张预处理好的图一次过模型，按 fetch_name_1（每图框数）切分。"""
         outputs = _run_predictor(
             self.predictor,
-            {"image": tensor, "scale_factor": scale},
+            {
+                "image": np.stack(tensors),
+                "scale_factor": np.stack(scales),
+            },
         )
         candidates = [
             value
             for value in outputs.values()
             if value.ndim == 2 and value.shape[-1] == 6
         ]
-        if len(candidates) != 1:
+        counts = [
+            value
+            for value in outputs.values()
+            if value.ndim == 1 and value.dtype == np.int32
+        ]
+        if len(candidates) != 1 or len(counts) != 1:
             shapes = {name: value.shape for name, value in outputs.items()}
             raise RuntimeError(f"检测模型输出结构异常: {shapes}")
-
-        detections: list[Detection] = []
-        for class_id, score, left, top, right, bottom in candidates[0]:
-            if int(class_id) != 0 or float(score) < self.threshold:
-                continue
-            if right <= left or bottom <= top:
-                continue
-            detections.append(
-                Detection(
-                    score=float(score),
-                    box=(float(left), float(top), float(right), float(bottom)),
-                )
+        boxes = candidates[0]
+        counts = counts[0]
+        if int(counts.sum()) != len(boxes) or len(counts) != len(tensors):
+            raise RuntimeError(
+                f"检测模型批量输出无法按图切分: counts={counts.tolist()} rows={len(boxes)}"
             )
-        return detections
+
+        results: list[list[Detection]] = []
+        offset = 0
+        for count in counts:
+            detections: list[Detection] = []
+            for class_id, score, left, top, right, bottom in boxes[offset : offset + count]:
+                offset_score = float(score)
+                if int(class_id) != 0 or offset_score < self.threshold:
+                    continue
+                if right <= left or bottom <= top:
+                    continue
+                detections.append(
+                    Detection(
+                        score=offset_score,
+                        box=(float(left), float(top), float(right), float(bottom)),
+                    )
+                )
+            results.append(detections)
+            offset += int(count)
+        return results
 
 
 class PaddleAttributeModel:
@@ -127,21 +169,30 @@ class PaddleAttributeModel:
         self.mean = np.asarray([0.485, 0.456, 0.406], dtype=np.float32)[:, None, None]
         self.std = np.asarray([0.229, 0.224, 0.225], dtype=np.float32)[:, None, None]
 
-    def predict(self, crop: np.ndarray) -> np.ndarray:
+    def _preprocess(self, crop: np.ndarray) -> np.ndarray:
         if crop.size == 0:
             raise ValueError("属性模型收到空裁片")
         resized = cv2.resize(crop, (self.width, self.height), interpolation=cv2.INTER_LINEAR)
         rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
         tensor = rgb.transpose(2, 0, 1).astype(np.float32) / 255.0
-        tensor = ((tensor - self.mean) / self.std)[None]
+        return (tensor - self.mean) / self.std
+
+    def predict(self, crop: np.ndarray) -> np.ndarray:
+        return self.predict_batch([crop])[0]
+
+    def predict_batch(self, crops: list[np.ndarray]) -> np.ndarray:
+        """批量推理：N 张裁片一次过模型，返回 (N, 属性数)。吞吐场景必须走这里。"""
+        if not crops:
+            raise ValueError("predict_batch 收到空列表")
         input_names = self.predictor.get_input_names()
         if len(input_names) != 1:
             raise RuntimeError(f"属性模型输入结构异常: {input_names}")
-        outputs = _run_predictor(self.predictor, {input_names[0]: tensor})
+        batch = np.stack([self._preprocess(crop) for crop in crops])
+        outputs = _run_predictor(self.predictor, {input_names[0]: batch})
         if len(outputs) != 1:
             shapes = {name: value.shape for name, value in outputs.items()}
             raise RuntimeError(f"属性模型输出结构异常: {shapes}")
-        return next(iter(outputs.values()))[0]
+        return next(iter(outputs.values()))
 
 
 class FaceMaskModel:
@@ -159,7 +210,7 @@ class FaceMaskModel:
             raise ValueError(f"口罩类别文件内容异常: {classes}")
         self.session = ort.InferenceSession(
             str(model_path),
-            providers=["CPUExecutionProvider"],
+            providers=_ort_providers(),
         )
         self.input_name = self.session.get_inputs()[0].name
         self.confidence = confidence

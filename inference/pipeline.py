@@ -126,32 +126,79 @@ class RecognitionPipeline:
 
     def recognize_array(self, image: np.ndarray) -> dict[str, list[dict[str, Any]]]:
         """对已解码的 BGR 图像直接识别（FastAPI 服务走这个入口，不落盘）。"""
+        return self.recognize_batch([image])[0]
 
-        persons: list[dict[str, Any]] = []
-        for detection in self.person_detector.predict(image):
-            body = self._expanded_crop(
-                image, detection.box, self.person_attribute_crop_scale
-            )
-            if body is None:
-                continue
-            attributes = decode_person_attributes(self.person_attributes.predict(body))
-            head = self._upper_crop(image, detection.box, 0.40)
-            attributes["口罩"] = self.face_mask.predict(head) if head is not None else "未佩戴口罩"
-            persons.append(attributes)
+    def recognize_batch(
+        self, images: list[np.ndarray]
+    ) -> list[dict[str, list[dict[str, Any]]]]:
+        """批量识别：整图预处理一次共享给行人/车辆两个检测器，两个检测各自
+        一次批量前向；随后跨图收集全部人物/车辆裁片，属性模型各跑一次大批。
+        吞吐场景（FastAPI worker）必须走这里而不是逐张 recognize_array。"""
 
-        vehicles: list[VehicleResult] = []
-        for detection in self.vehicle_detector.predict(image):
-            vehicle = self._expanded_crop(image, detection.box)
-            if vehicle is None:
-                continue
-            content = decode_vehicle_attributes(self.vehicle_attributes.predict(vehicle))
-            content["车牌"] = self.plate.predict(vehicle)
-            vehicles.append(VehicleResult(detection=detection, content=content))
+        tensors, scales = zip(
+            *(self.person_detector.preprocess(image) for image in images)
+        )
+        person_dets = self.person_detector.predict_prepped(list(tensors), list(scales))
+        vehicle_dets = self.vehicle_detector.predict_prepped(list(tensors), list(scales))
 
-        return {
-            "行人": persons,
-            "车辆": [item.content for item in suppress_same_plate(vehicles)],
+        # 跨图收集人物裁片：(图序号, 头部裁片, 身体裁片)
+        person_jobs: list[tuple[int, np.ndarray | None, np.ndarray]] = []
+        for index, (image, detections) in enumerate(zip(images, person_dets)):
+            for detection in detections:
+                body = self._expanded_crop(
+                    image, detection.box, self.person_attribute_crop_scale
+                )
+                if body is None:
+                    continue
+                head = self._upper_crop(image, detection.box, 0.40)
+                person_jobs.append((index, head, body))
+
+        person_results: dict[int, list[dict[str, Any]]] = {
+            i: [] for i in range(len(images))
         }
+        if person_jobs:
+            scores_batch = self.person_attributes.predict_batch(
+                [body for _, _, body in person_jobs]
+            )
+            for (index, head, _), scores in zip(person_jobs, scores_batch):
+                attributes = decode_person_attributes(scores)
+                attributes["口罩"] = (
+                    self.face_mask.predict(head) if head is not None else "未佩戴口罩"
+                )
+                person_results[index].append(attributes)
+
+        # 跨图收集车辆裁片
+        vehicle_jobs: list[tuple[int, Detection, np.ndarray]] = []
+        for index, (image, detections) in enumerate(zip(images, vehicle_dets)):
+            for detection in detections:
+                vehicle = self._expanded_crop(image, detection.box)
+                if vehicle is None:
+                    continue
+                vehicle_jobs.append((index, detection, vehicle))
+
+        vehicle_results: dict[int, list[VehicleResult]] = {
+            i: [] for i in range(len(images))
+        }
+        if vehicle_jobs:
+            scores_batch = self.vehicle_attributes.predict_batch(
+                [crop for _, _, crop in vehicle_jobs]
+            )
+            for (index, detection, vehicle), scores in zip(vehicle_jobs, scores_batch):
+                content = decode_vehicle_attributes(scores)
+                content["车牌"] = self.plate.predict(vehicle)
+                vehicle_results[index].append(
+                    VehicleResult(detection=detection, content=content)
+                )
+
+        return [
+            {
+                "行人": person_results[index],
+                "车辆": [
+                    item.content for item in suppress_same_plate(vehicle_results[index])
+                ],
+            }
+            for index in range(len(images))
+        ]
 
     @staticmethod
     def _decode_image(path: Path) -> np.ndarray:
