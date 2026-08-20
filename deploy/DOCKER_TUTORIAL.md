@@ -112,9 +112,16 @@ docker run --rm --gpus all nvidia/cuda:12.6.0-base-ubuntu22.04 nvidia-smi
 
 ---
 
-## 阶段 4：构建识别服务镜像（约 5-10 分钟）
+## 阶段 4：构建识别服务镜像（首次约 10-15 分钟）
 
-**4.1 拉 Paddle 官方 GPU 底座镜像**（约 5GB，只拉这一次，以后构建都复用它）：
+项目提供两个配方，**默认用瘦身版**：
+
+| 配方 | 底座 | 产物体积 | 构建速度 | 适用 |
+|---|---|---|---|---|
+| `deploy/Dockerfile`（默认） | python:3.10-slim + pip 装 paddle-gpu | **约 3.5-4GB** | 首次 10-15 分钟（下载 NVIDIA 轮子），之后秒级 | 要导出分享给别人 |
+| `deploy/Dockerfile.full` | Paddle 官方 GPU 镜像 | 约 14GB | 底座拉过一次后构建很快 | 自己服务器内部快速迭代 |
+
+**4.1（仅使用 Dockerfile.full 时需要）拉 Paddle 官方 GPU 底座镜像**（只拉一次）：
 
 ```bash
 docker pull ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddle:3.3.0-gpu-cuda12.6-cudnn9.5
@@ -125,6 +132,7 @@ docker pull ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddle:3.3.0-gpu-c
 > `ccr-2vdh3abv-pub.cnc.bj.baidubce.com`，完整 tag 列表见
 > [飞桨官方 Docker 安装文档](https://www.paddlepaddle.org.cn/documentation/docs/zh/install/docker/linux-docker.html)。
 > CUDA 12.6 + cuDNN 9.5 这个组合对 A30 / 3080Ti / 3090 等 Ampere 卡兼容性最稳。
+> 默认瘦身版配方不需要这一步（python:3.10-slim 会自动拉）。
 
 **4.2 把构建上下文弄上服务器。**"构建上下文"就是镜像里要装的全部文件
 （代码 + 模型权重，约 200MB）。两种途径任选：
@@ -155,10 +163,11 @@ docker build -f deploy/Dockerfile -t person-vehicle-recognition:latest .
 > 结尾的 `.` 表示"上下文是当前目录"（Dockerfile 里的 COPY 路径都相对它）。
 
 配方做了什么（`deploy/Dockerfile` 里有逐行注释）：
-1. `FROM` Paddle 官方 GPU 镜像（底座）；
-2. pip 装增量小包（FastAPI、opencv、onnxruntime-gpu 等，走清华镜像加速）；
+1. `FROM python:3.10-slim`，pip 装 paddlepaddle-gpu（飞桨官方 cu126 索引，
+   自带 NVIDIA 依赖轮子）；
+2. pip 装其余小包（FastAPI、opencv、onnxruntime-gpu 等，走清华镜像加速）；
 3. 车牌库 `hyperlpr3` 单独用 `--no-deps` 装 —— **坑 3**：它的依赖列表会拉
-   CPU 版 onnxruntime/paddle，把底座的 GPU 环境顶掉，必须阻止它装依赖；
+   CPU 版 onnxruntime/paddle，把 GPU 环境顶掉，必须阻止它装依赖；
 4. 复制代码和模型权重；
 5. 入口 = 启动 uvicorn 提供 HTTP 服务。
 
@@ -329,3 +338,5 @@ build 命令即可，底座和 pip 层都有缓存，几十秒完成），然后
 | 8 | 容器看不到显卡 | 服务报 GPU 不可用 | 阶段 3.2 的 toolkit 没装或没重启 docker |
 | 9 | 多进程子进程报 CUDA 错 | cudaErrorInitializationError | 代码里已用 spawn 启动子进程（fork 会继承父进程 CUDA 状态），勿改 |
 | 10 | 提交快但识别慢 | 大量 pending | 识别吞吐是 GPU 物理上限，靠 429 削峰；这不是故障 |
+| 11 | slim 镜像里 paddle 导入失败 | libgomp.so.1 找不到 | Dockerfile 已含 `apt-get install libgomp1`（slim 系统没装 OpenMP 运行时） |
+| 12 | 容器里 apt-get 失败 | exit code: 100 | 国内服务器连不上 deb.debian.org，Dockerfile 已先换成中科大镜像源 |
