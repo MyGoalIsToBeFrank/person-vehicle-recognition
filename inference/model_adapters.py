@@ -49,7 +49,9 @@ def _paddle_predictor(model: Path, params: Path, device: str):
         config.disable_gpu()
         config.set_cpu_math_library_num_threads(1)
     config.switch_ir_optim(True)
-    config.enable_memory_optim()
+    if model.suffix == ".pdmodel":
+        # memory_optimize_pass 只在旧 IR 注册；PIR(.json) 模型开了会直接崩。
+        config.enable_memory_optim()
     config.disable_glog_info()
     return create_predictor(config)
 
@@ -283,17 +285,20 @@ class PlateRecognizer:
         onnx_dir = cache_root / "20230229" / "onnx"
         _require_files([onnx_dir / name for name in self.REQUIRED_NAMES])
 
-        # 0.1.3 在导入时检查 HOMEPATH。先指向已验证的外部模型目录，
-        # 可阻止包在用户目录中隐式下载；导入后立即恢复进程环境。
-        previous_homepath = os.environ.get("HOMEPATH")
+        # 0.1.3 在 import 时检查 ~/.hyperlpr3/20230229，缺失就联网下载。
+        # Windows 读 HOMEPATH、Linux 读 HOME，两个都临时指向已验证的外部模型目录，
+        # 导入后立即恢复进程环境。
+        previous = {key: os.environ.get(key) for key in ("HOME", "HOMEPATH")}
+        os.environ["HOME"] = str(vehicle_model_dir)
         os.environ["HOMEPATH"] = str(vehicle_model_dir)
         try:
             hyperlpr3 = importlib.import_module("hyperlpr3")
         finally:
-            if previous_homepath is None:
-                os.environ.pop("HOMEPATH", None)
-            else:
-                os.environ["HOMEPATH"] = previous_homepath
+            for key, value in previous.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
         self.engine = hyperlpr3.LicensePlateCatcher(folder=str(cache_root))
 
     def predict(self, crop: np.ndarray) -> str:

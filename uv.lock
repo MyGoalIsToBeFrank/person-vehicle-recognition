@@ -248,10 +248,11 @@ wheels = [
 ]
 
 [[package]]
-name = "independent-structured-inference"
+name = "inference-structured-pipeline"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
+    { name = "fastapi" },
     { name = "hyperlpr3" },
     { name = "numpy" },
     { name = "nvidia-cublas" },
@@ -264,11 +265,14 @@ dependencies = [
     { name = "onnxruntime" },
     { name = "opencv-python" },
     { name = "paddlepaddle-gpu" },
+    { name = "python-multipart" },
     { name = "setuptools" },
+    { name = "uvicorn" },
 ]
 
 [package.metadata]
 requires-dist = [
+    { name = "fastapi", specifier = ">=0.115" },
     { name = "hyperlpr3", specifier = "==0.1.3" },
     { name = "numpy", specifier = "<2" },
     { name = "nvidia-cublas", specifier = "==13.0.2.14", index = "https://www.paddlepaddle.org.cn/packages/stable/cu130/" },
@@ -281,7 +285,9 @@ requires-dist = [
     { name = "onnxruntime", specifier = ">=1.23,<2" },
     { name = "opencv-python", specifier = "<=4.6.0.66" },
     { name = "paddlepaddle-gpu", specifier = "==3.3.0", index = "https://www.paddlepaddle.org.cn/packages/stable/cu130/" },
+    { name = "python-multipart" },
     { name = "setuptools" },
+    { name = "uvicorn", specifier = ">=0.30" },
 ]
 
 [[package]]

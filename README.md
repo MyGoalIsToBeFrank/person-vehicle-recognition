@@ -9,7 +9,7 @@
 | --- | --- | --- | --- |
 | **一、二次标注** | 既有数据集 → 模型初检/预标注 → 人工核对出金标准 | `finetune/prepare_dataset.py`、`finetune/import_aizoo.py`、`finetune/review_server.py` | [finetune/README.md](finetune/README.md) |
 | **二、微调** | 金标准 + 尘土化扩充 → 训练三个模型 → 训练报告 | `finetune/train_*.py`、`finetune/dust_augment.py`、`finetune/training_report.py` | [finetune/README.md](finetune/README.md) |
-| **三、推理** | 用模型跑图片目录，产出结构化结果 | `inference/`（精简应用端） | [inference/README.md](inference/README.md) |
+| **三、推理** | FastAPI 异步识别服务：提交图片拿 session_id，轮询取结果 | `inference/`（识别管线）、`service/`（HTTP 服务）、`deploy/`（Docker 打包） | [inference/README.md](inference/README.md)、[service/README.md](service/README.md) |
 
 ## 一、二次标注（四个阶段）
 
@@ -65,9 +65,6 @@ python finetune/import_aizoo.py
 python finetune/review_server.py            # 默认开启属性预标注
 python finetune/review_server.py --no-prelabel   # 无 GPU 时跳过预标注
 python finetune/review_server.py --seed 42       # 固定随机出图顺序（默认每次启动随机）
-
-# 清空全部已确认/金标准并并回候选，从零重新标注（二次确认可用 --yes 跳过）
-python finetune/reset_progress.py --yes
 ```
 
 ## 二、微调
@@ -101,9 +98,9 @@ python finetune/reset_progress.py --yes
 
 | 环节        | 模型                      | 当前部署权重                                              | 微调起点                                                                                  | 训练框架                   |
 | ----------- | ------------------------- | --------------------------------------------------------- | ----------------------------------------------------------------------------------------- | -------------------------- |
-| ① 人物检测 | PP-YOLOE-S                | `models/human/mot_ppyoloe_s_36e_pipeline`               | `models/original/person_detector/mot_ppyoloe_s_36e_pipeline.pdparams`（官方可训练权重） | `vendor/PaddleDetection` |
-| ② 人物属性 | PP-HGNet small（26 属性） | `models/human/PPHGNet_small_person_attribute_954_infer` | 同一部署权重转回可训练结构                                                                | `vendor/PaddleClas`      |
-| ③ 口罩识别 | YOLOv5s（2 类）           | `models/face_mask_yolov5`（ONNX）                       | 由 ONNX 反建的 YOLOv5s 权重                                                               | `vendor/yolov5`          |
+| ① 人物检测 | PP-YOLOE-S                | `models/finetuned/person_detector`（PIR 部署格式）       | `models/original/person_detector/mot_ppyoloe_s_36e_pipeline.pdparams`（官方可训练权重） | `vendor/PaddleDetection` |
+| ② 人物属性 | PP-HGNet small（26 属性） | `models/finetuned/person_attribute`                      | 官网 `models/human/PPHGNet_small_person_attribute_954_infer` 转回可训练结构             | `vendor/PaddleClas`      |
+| ③ 口罩识别 | YOLOv5s（2 类）           | `models/finetuned/face_mask`（ONNX）                     | 由官网 `models/face_mask_yolov5` 的 ONNX 反建的 YOLOv5s 权重                             | `vendor/yolov5`          |
 
 推理端还有三个**不参与微调**的模型：车辆检测 `models/vehicle/mot_ppyoloe_s_36e_ppvehicle`、
 车辆属性 `models/vehicle/vehicle_attribute_model`、车牌 `models/vehicle/.hyperlpr3`（HyperLPR3）。
@@ -114,22 +111,34 @@ python finetune/reset_progress.py --yes
 
 ## 三、推理
 
-`inference/` 是精简的推理应用端（约四百行），与训练管线解耦：**输入**是一个图片目录，
-**输出**是结构化中文业务结果（JSON + Excel），中间不含框、置信度等模型细节。
-完整接口说明（配置项、命令行覆盖、模型替换、输出字段定义）见
-[**inference/README.md**](inference/README.md)。
+推理分两层，均与训练管线解耦：
+
+- `inference/`：识别管线本体（约四百行），输入图片、输出结构化中文业务结果
+  （不含框、置信度等模型细节）。也可作为命令行批量工具单独使用。
+- `service/`：FastAPI 异步服务，把管线包装成 HTTP 接口，面向视频抽帧/抓拍流：
+  提交图片立即返回 `session_id`，结果凭 `session_id` 轮询获取；队列有硬上限，
+  满了返回 429 拒收，高并发抓拍不会把服务压垮。
+- `deploy/`：Docker 打包（Paddle GPU 镜像），与业务代码隔离。
+
+接口定义、字段示例、视频抽帧客户端用法见
+[**service/README.md**](service/README.md)；命令行批量用法与模型替换见
+[**inference/README.md**](inference/README.md)；Docker 部署与分享见
+[**deploy/DOCKER.md**](deploy/DOCKER.md)。
 
 ```powershell
+# 命令行批量（本地直出）
 python inference/run.py          # 读 easy_test/ → 原子写 inference/result.json
-node inference/export_xlsx.mjs   # 读 result.json → 写 inference/result.xlsx（带缩略图）
+
+# HTTP 服务（生产用法）
+python service/app.py            # 启动服务，默认 :8000
+python service/video_client.py --source video.mp4 --fps 2 --output results.jsonl
 ```
 
 输出速览（字段完整定义与示例在 inference/README.md）：
 
-- `result.json`：JSON 数组，每张图片一项，含 `图片位置`、`处理耗时（毫秒）`、
+- `result.json` / 接口 `result` 字段：`图片位置`、`处理耗时（毫秒）`、
   `识别内容`（`行人` 数组：性别/年龄/朝向/眼镜/帽子/口罩/包/上装/下装/鞋靴等；
   `车辆` 数组：颜色/车型/车牌）。
-- `result.xlsx`：每张图片一行：缩略图、图片位置、耗时、行人识别内容、车辆识别内容。
 
 验收微调结果后，只改 `inference/config.py` 里的 `PERSON_DETECTOR_DIR`、
 `PERSON_ATTRIBUTE_DIR`、`FACE_MASK_DIR`（属性模型另把
@@ -161,7 +170,9 @@ dataset/
       person_detection_coco/    # 人物检测训练用 COCO（images/ + annotations/instances_*.json）
     _legacy/                    # 旧版数据归档，不参与任何流程
 finetune/                       # 微调侧：数据准备、标注 WebUI、训练、训练报告（见 finetune/README.md）
-inference/                      # 推理侧：精简的推理应用端，只读模型和图片（见 inference/README.md）
+inference/                      # 推理侧：识别管线本体，只读模型和图片（见 inference/README.md）
+service/                        # FastAPI 异步识别服务 + 视频抽帧客户端（见 service/README.md）
+deploy/                         # Docker 打包（Paddle GPU 镜像）与部署教学（见 deploy/DOCKER.md）
 models/                         # 全部模型权重（original + finetuned，来源见 MODEL_SOURCES.md）
 vendor/                         # PaddleClas / PaddleDetection / yolov5 源码（仅训练用）
 easy_test/                      # 推理测试图片
@@ -189,12 +200,13 @@ python3 -m venv .venv-train
 .venv/bin/python finetune/review_server.py            # 标注 WebUI
 .venv-train/bin/python finetune/train_person_detector.py --device GPU
 .venv/bin/python inference/run.py
-node inference/export_xlsx.mjs
+.venv/bin/python service/app.py                       # FastAPI 服务
 ```
 
 - Windows 专用的 CUDA DLL 注册（`configure_runtime_dlls`）在非 Windows 平台自动跳过，
   无需处理。
 - `.torch-cu130/` 是本机 Windows 的手工 torch 目录，Linux/macOS 上删掉，正常 pip 安装即可。
 - macOS 无 CUDA，Paddle/torch 都走 CPU；口罩与车牌 ONNX 模型本来就只用 CPU。
-- 推理侧如需容器化：`inference/` + `models/` + `.venv` 依赖即可成镜像，训练侧不进镜像；
-  训练容器化时把 `dataset/` 和 `models/` 以卷挂载进容器（`raw` 可只读），代码无需改动。
+- 生产部署建议直接用 `deploy/` 下的 Dockerfile 构建 Paddle GPU 镜像（训练侧不进镜像），
+  详见 [deploy/DOCKER.md](deploy/DOCKER.md)；训练容器化时把 `dataset/` 和 `models/`
+  以卷挂载进容器（`raw` 可只读），代码无需改动。

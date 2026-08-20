@@ -1,0 +1,15 @@
+# 增量 Python 依赖（在 Paddle 官方 GPU 镜像之上安装）
+# Paddle 本体由 base 镜像提供，此处不重复安装。
+
+numpy<2
+opencv-python-headless==4.6.0.66
+onnxruntime
+fastapi
+uvicorn
+python-multipart
+requests
+tqdm
+setuptools
+
+# 注意：hyperlpr3 在 Dockerfile 中用 --no-deps 单独安装，
+# 否则会拉入 CPU 版 onnxruntime / paddle 依赖，覆盖 base 镜像的 GPU 环境。

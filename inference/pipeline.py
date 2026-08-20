@@ -122,7 +122,10 @@ class RecognitionPipeline:
         self.person_attribute_crop_scale = person_attribute_crop_scale
 
     def recognize(self, image_path: Path) -> dict[str, list[dict[str, Any]]]:
-        image = self._decode_image(image_path)
+        return self.recognize_array(self._decode_image(image_path))
+
+    def recognize_array(self, image: np.ndarray) -> dict[str, list[dict[str, Any]]]:
+        """对已解码的 BGR 图像直接识别（FastAPI 服务走这个入口，不落盘）。"""
 
         persons: list[dict[str, Any]] = []
         for detection in self.person_detector.predict(image):

@@ -32,12 +32,6 @@ python finetune/prepare_dataset.py --input-dir dataset/raw/prw-download/frames -
 python finetune/import_aizoo.py
 ```
 
-从版本 2 旧布局迁移候选（一次性，已执行过则无需重复）：
-
-```powershell
-python finetune/migrate_v3.py
-```
-
 ## 2. 人工核对与尘土化（WebUI）
 
 ```powershell
@@ -61,11 +55,9 @@ python finetune/review_server.py --seed 42  # 可选：固定随机出图顺序�
 按框 id 对齐重建属性裁剪——框未动标签保留，框动了重裁剪但保留标签，框删除则连同其
 属性裁剪与标注一并移除。「排除」只从候选移除，不写金标准，也不删除 raw 原图。
 
-从头重新标注（清空全部 confirmed/gold 与增强产物，候选并回）：
-
-```powershell
-python finetune/reset_progress.py --yes
-```
+需要从头重新标注时，直接在 WebUI 各页的「回改已保存」模式逐条修正；如需整体清空，
+删除 `dataset/processed/` 下对应阶段的 `confirmed.json` / `gold.json`（和 `4_augmented/`）
+即可，候选文件不受影响。
 
 ## 3. 微调三个模型
 
@@ -117,11 +109,11 @@ PERSON_ATTRIBUTE_CROP_SCALE = 1.0
 FACE_MASK_DIR = TRAINING_OUTPUT_DIR / "face_mask"
 ```
 
-随后仍运行原入口：
+随后仍运行原入口（命令行批量或 FastAPI 服务均可）：
 
 ```powershell
 python inference/run.py
-node inference/export_xlsx.mjs
+python service/app.py
 ```
 
-回滚时把这三个模型目录和口罩哈希改回原值即可。车辆、车牌、JSON 和 Excel 流程不变。
+回滚时把这三个模型目录改回原值即可。车辆、车牌与输出流程不变。

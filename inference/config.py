@@ -6,7 +6,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 from pathlib import Path
 
@@ -22,7 +21,6 @@ PROJECT_ROOT = HERE.parent
 DATA_DIR = PROJECT_ROOT / "easy_test"
 DEVICE = "GPU"
 RESULT_JSON = HERE / "result.json"
-RESULT_XLSX = HERE / "result.xlsx"
 INFERENCE_VENV_DIR = PROJECT_ROOT / ".venv"
 
 # 每个模型单独配置，避免为了替换一个微调模型而复制整套 models 目录。
@@ -88,16 +86,3 @@ def configure_runtime_dlls(environment_dir: Path) -> list[object]:
     if not hasattr(os, "add_dll_directory"):
         return []
     return [os.add_dll_directory(str(path)) for path in dll_dirs]
-
-
-def exported_paths() -> dict[str, str]:
-    """导出 Node Excel 工具实际消费的路径（DATA_DIR 用于解析相对图片位置）。"""
-    return {
-        "DATA_DIR": str(DATA_DIR),
-        "RESULT_JSON": str(RESULT_JSON),
-        "RESULT_XLSX": str(RESULT_XLSX),
-    }
-
-
-if __name__ == "__main__":
-    print(json.dumps(exported_paths(), ensure_ascii=False))

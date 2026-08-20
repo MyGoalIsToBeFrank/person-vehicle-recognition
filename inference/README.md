@@ -10,7 +10,7 @@
 
 日常只编辑 [`config.py`](config.py)，所有输入、输出、环境和七个模型目录都在此配置。
 切换微调前后权重只需改 `PERSON_DETECTOR_DIR`、`PERSON_ATTRIBUTE_DIR`、
-`FACE_MASK_DIR` 和口罩 SHA-256，无需改动任何其他代码。
+`FACE_MASK_DIR`（均按目录名指定，不做哈希校验），无需改动任何其他代码。
 
 ```bash
 python inference/run.py
@@ -27,8 +27,9 @@ python inference/run.py --person-detector-dir models/finetuned/person_detector
 **输入图片从哪来**：默认读 `config.py` 的 `DATA_DIR`（当前为 `easy_test/`）下全部图片；
 临时换目录用 `--data-dir 路径`；只想试前几张加 `--limit N`。
 
-**结果写到哪**：默认原子写 `inference/result.json`（`RESULT_JSON`），Excel 导出固定读它并写
-`inference/result.xlsx`（`RESULT_XLSX`）。临时改输出用 `--result-json 路径`。
+**结果写到哪**：默认原子写 `inference/result.json`（`RESULT_JSON`）。临时改输出用
+`--result-json 路径`，或用 `--output-dir 目录` 指定输出目录（程序自动在目录下写
+`result.json`，优先于 `--result-json`）。
 
 **如何替换模型**：改 `config.py` 里对应的目录常量即可，七个模型互不耦合：
 
@@ -99,11 +100,12 @@ python inference/run.py --person-detector-dir models/finetuned/person_detector
 口罩识别使用行人原检测框上部 40% 的裁片，业务上只有两类：检不到可靠口罩框
 （无脸、背面、模糊小脸等）统一归为“未佩戴口罩”。
 
-**输出二：`result.xlsx`**（`node inference/export_xlsx.mjs` 生成）。默认写
-`inference/result.xlsx`；工作簿“识别结果”每张图片一行，五列：
-`图像`（保持比例的原图缩略图）、`图片位置`、`处理耗时（毫秒）`、`行人`、`车辆`
-（识别内容的多行文本）。只读 `result.json` 和其中记录的原图，不引入框、置信度或
-额外统计。
+## HTTP 服务（FastAPI）
+
+生产环境一般不直接调 `run.py`，而是用 `service/` 下的 FastAPI 异步服务：
+提交图片立即返回 `session_id`，凭它轮询获取结果（结果字段与本文件的
+`识别内容` 格式完全一致）。接口定义见 [`service/README.md`](../service/README.md)，
+Docker 部署见 [`deploy/DOCKER.md`](../deploy/DOCKER.md)。
 
 ## 外部目录 / Docker 用法
 
@@ -111,16 +113,10 @@ python inference/run.py --person-detector-dir models/finetuned/person_detector
 输入图片与结果目录通过挂载卷传入：
 
 ```bash
-# 容器内运行：读取外部挂载的 /data/images，输出到外部挂载的 /output
+# 容器内命令行批量运行：读取外部挂载的 /data/images，输出到外部挂载的 /output
 python inference/run.py \
   --data-dir /data/images \
   --output-dir /output
-
-# Excel 导出同样可指定输入 JSON 与输出 xlsx 位置
-node inference/export_xlsx.mjs \
-  --result-json /output/result.json \
-  --data-dir /data/images \
-  --output-xlsx /output/result.xlsx
 ```
 
 要点：
@@ -128,26 +124,7 @@ node inference/export_xlsx.mjs \
 - `--data-dir` 覆盖图片输入目录；`--output-dir` 指定输出目录，程序自动在目录下写
   `result.json`（优先于 `--result-json`）。
 - `--result-json` 仍保留，用于直接覆盖 JSON 文件路径。
-- `export_xlsx.mjs` 用 `--data-dir` 把 `result.json` 里的相对图片位置解析回绝对路径读取缩略图；
-  用 `--output-xlsx` 把 Excel 也写到外部目录。
-- 容器内启动 WebUI 时记得 `--host 0.0.0.0` 并映射端口。
 
 GPU 选项用于 Paddle 模型；当前口罩和车牌 ONNX 模型使用 CPU Execution Provider。
 
 所有权重的上游地址、归档哈希、本地文件哈希和授权边界统一记录在 [`models/MODEL_SOURCES.md`](../models/MODEL_SOURCES.md) 及各权重目录的 `SOURCE.md` 中。
-
-## 导出 Excel
-
-```bash
-node inference/export_xlsx.mjs
-
-# 外部目录 / Docker 场景
-node inference/export_xlsx.mjs \
-  --result-json /output/result.json \
-  --data-dir /data/images \
-  --output-xlsx /output/result.xlsx
-```
-
-导出程序只读取 `result.json` 和其中记录的原图，结果默认写到 `inference/result.xlsx`。
-工作簿每张图片一行，包含保持比例的原图缩略图、图片位置、耗时、行人和车辆识别内容；
-不引入框、置信度、完整 JSON 或额外统计。
