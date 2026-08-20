@@ -21,9 +21,15 @@ docker run --rm --gpus all \
 
 代码仓库不保存模型权重和 `vendor/PaddleDetection`：二者体积较大，并且模型权重在外部分发前需要单独确认许可。服务器推荐使用固定工作区 `/home/ubuntu/pvr-src`，Git 管代码、忽略文件保存本机资产。首次建立：
 
+仓库为私有仓库时，先把服务器公钥作为只读 Deploy key 添加到 GitHub 仓库的 `Settings → Deploy keys`，不要把个人访问令牌写入服务器文件。然后执行：
+
 ```bash
-git clone https://github.com/MyGoalIsToBeFrank/person-vehicle-recognition.git \
+GIT_SSH_COMMAND='ssh -i /home/ubuntu/.ssh/pvr_github_deploy_ed25519 -o IdentitiesOnly=yes' \
+  git clone git@github.com:MyGoalIsToBeFrank/person-vehicle-recognition.git \
   /home/ubuntu/pvr-src
+
+git -C /home/ubuntu/pvr-src config core.sshCommand \
+  'ssh -i /home/ubuntu/.ssh/pvr_github_deploy_ed25519 -o IdentitiesOnly=yes'
 
 mkdir -p /home/ubuntu/pvr-src/models /home/ubuntu/pvr-src/vendor
 cp -a /home/ubuntu/docker-ctx/models/. /home/ubuntu/pvr-src/models/
