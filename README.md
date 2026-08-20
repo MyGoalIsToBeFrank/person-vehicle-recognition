@@ -1,212 +1,79 @@
-# 二次标注、微调与推理管线
+# 高吞吐行人/车辆识别服务
 
-从既有数据集（AIZOO 口罩、PRW 全景）出发，经人工核对产出金标准，微调人物检测、
-人物属性、口罩识别三个模型，最后在 `inference/` 推理应用端一键切换模型。
+本仓库把现有微调权重部署为单实例、异步的 CUDA/TensorRT 识别服务。`finetune/` 只作为权重与历史实验来源；构建和运行不会训练或修改任何模型。
 
-项目按职责分三段，对应三个入口文档：
+## 数据路径
 
-| 段 | 做什么 | 代码位置 | 详细文档 |
-| --- | --- | --- | --- |
-| **一、二次标注** | 既有数据集 → 模型初检/预标注 → 人工核对出金标准 | `finetune/prepare_dataset.py`、`finetune/import_aizoo.py`、`finetune/review_server.py` | [finetune/README.md](finetune/README.md) |
-| **二、微调** | 金标准 + 尘土化扩充 → 训练三个模型 → 训练报告 | `finetune/train_*.py`、`finetune/dust_augment.py`、`finetune/training_report.py` | [finetune/README.md](finetune/README.md) |
-| **三、推理** | FastAPI 异步识别服务：提交图片拿 session_id，轮询取结果 | `inference/`（识别管线）、`service/`（HTTP 服务）、`deploy/`（Docker 打包） | [inference/README.md](inference/README.md)、[service/README.md](service/README.md) |
+1. FastAPI 校验请求大小和格式，把图片交给有界原生队列，并立即返回 `202 + session_id`。
+2. 单个 C++20/CUDA worker 在最多 2ms 的窗口内跨请求聚批。
+3. JPEG 由 nvJPEG 批量解码到 GPU；resize、颜色转换、归一化、ROI、NMS、DB 连通域、车牌透视裁切、属性后处理和 OCR token argmax 都在 CUDA 中完成。
+4. 两个 PP-YOLOE 检测器共享预处理并使用双 CUDA stream；属性、口罩和 PP-OCRv3 det/rec 对全部 ROI 聚批。
+5. 完成结果保留 60 秒，通过单个或批量结果接口获取。队列满立即返回 429，不允许请求无限积压。
 
-## 一、二次标注（四个阶段）
+FastAPI 只负责网络协议和状态码，不加载 Paddle、ONNX Runtime 或模型。进程内只有一个原生 worker，不使用 Python 多进程搬运图片。
 
-```
-raw 原图 ──► ① 目标识别 ──► ② 属性标注 ──► ③ 口罩标注 ──► ④ 尘土化 ──► 训练
-             整图核框        小图核属性      小图核口罩      标签不变的扩充
-             （模型初检）     （模型预标注）   （AIZOO 预填）
-```
+## 模型
 
-- **① 目标识别**：`prepare_dataset.py` 用当前人物检测模型对整图初检；WebUI 里人工增删改框
-  （不看标签）。确认整图时自动把每个人物框裁成小图，并用属性模型预标注。
-- **② 属性标注**：只看人物裁剪小图，26 项属性已由模型预填，人工检查后保存。
-- **③ 口罩标注**：AIZOO 人脸框与类别由 `import_aizoo.py` 直接导入；WebUI 里只看带上下文的
-  人脸裁剪小图，确认或更改类别。候选基本正确时可批量批注：
-  `python finetune/batch_approve_mask.py --count 800`（沿用 AIZOO 原标签）。
-- **④ 尘土化**：对任一环节的金标准做昏黄化、尘土化等退化扩充，**几何与标签不变**；
-  增强副本按源图哈希继承 train/val/test 划分，且只有训练划分的副本参与训练。
+- 行人检测、人体属性、车辆检测、车辆属性、口罩：继续使用仓库已有权重。
+- 车牌：固定为 PaddleDetection 发布的 PP-OCRv3 det + rec。
+- Docker 构建从既有 checkpoint/部署权重生成动态 ONNX；不训练模型。
+- TensorRT engine 不进入共享镜像。首次启动按 GPU 名称、SM、TensorRT 精确版本、精度、builder 优化级别、workspace、ONNX SHA-256 和 profile 哈希写入 `/var/cache/pvr`。
+- TensorRT 在稳定输入地址上为固定批次 `1/8/16/32/64/128` 捕获 CUDA Graph；动态小批次或捕获不受支持时自动使用普通 `enqueueV3`，不牺牲正确性。
+- 两个并发检测器各有独立 TensorRT 激活内存池；严格串行的属性、口罩、车牌 det/rec 共享一个按最大需求分配的常驻池，避免 7 个 context 重复占用最大 profile 显存。
+- 当前默认精度为 FP16。INT8 只有通过逐模型精度闸门后才会启用，不能仅为吞吐数字牺牲结果。
 
-四个阶段都有 WebUI 标签页（`finetune/review_server.py`），全程只需检查与更改。
+每个 ONNX 的来源哈希、预处理、profile、输出语义和语义保持图重写均记录在镜像内的 `models/manifest.json`。来源与再分发提醒见 [models/MODEL_SOURCES.md](models/MODEL_SOURCES.md)。
 
-- **随机出图**：候选按随机顺序呈现（原始图片高度相关，顺序出图会集中在少数固定摄像头
-  的连拍簇上）。顺序在一次会话内稳定；`--seed N` 可固定顺序，便于中断后按同样顺序继续。
-- **回改已保存**：每个核对标签页工具栏有「待核对 / 回改已保存」切换。回改模式按
-  最近保存在前排列，改完重新保存即原地更新（候选数量不再减少）。检测页重新确认整图时
-  按框 id 对齐重建属性裁剪：框未动 → 裁剪与标签全保留；框动了 → 重裁剪但保留标签；
-  框被删 → 对应裁剪与属性标注（含金标准）一并移除。
-- **快捷键**：Q/E 或 ←/→ 保存并切换上/下一张；Enter 或 Ctrl+S 保存；检测页 A/D 切框、
-  N 新增框、Delete 删框；口罩页 1/2 选未佩戴/佩戴。
-
-### 数据量建议（参考阈值，非硬性规则）
-
-WebUI 标签按钮实时显示各环节「待核对 / 已保存」数量，标题栏会提示还差多少到建议起步量。
-按源图哈希自动划分（train 80% / val 10% / test 10%），数量太少会导致验证集为空无法训练：
-
-- **① 人物检测**：建议先积累 **≥500 张确认整图**再首次训练（验证集约 50 张）；1000+ 更稳。
-- **② 人物属性**：26 项多标签，建议 **≥800 个人物裁剪**起步；长尾属性（帽子、裙装、
-  手持物品等）若样本太少，宁可先只训练有代表性的属性，或优先标注包含这些属性的图。
-- **③ 口罩识别**：AIZOO 已自带标签、核对量大，**≥800 个人脸裁剪**很快可达；
-  注意保持「佩戴/未佩戴」两类大致均衡。
-- **④ 尘土化**：在金标准达到一定量后再做，增强只放大训练集，不能替代真实标注多样性；
-  建议增强副本数（variants）不超过 2–3，避免模型过拟合增强风格。
-
-### 标注常用命令
-
-```powershell
-# ① 生成/补充检测候选（只跑人物检测模型）
-python finetune/prepare_dataset.py --input-dir dataset/raw/prw-download/frames --device GPU
-
-# ③ 导入 AIZOO 口罩候选（只做一次）
-python finetune/import_aizoo.py
-
-# ①②③④ 人工核对与尘土化（四标签页 WebUI）
-python finetune/review_server.py            # 默认开启属性预标注
-python finetune/review_server.py --no-prelabel   # 无 GPU 时跳过预标注
-python finetune/review_server.py --seed 42       # 固定随机出图顺序（默认每次启动随机）
-```
-
-## 二、微调
-
-训练只读 confirmed/gold 与 `4_augmented/` 的训练划分；属性和口罩训练启动时把全部
-裁剪小图一次性解码进内存缓存，训练期不再读盘。
-
-```powershell
-# ④ 尘土化（也可在 WebUI 第四页操作）
-.venv/Scripts/python.exe finetune/dust_augment.py --stage attribute --variants 2 --intensity 1.2
-
-# 训练三个模型（每次都从官方权重重新开始，完成后直接覆盖 models/finetuned/）
-.venv-train\Scripts\python.exe finetune/train_person_detector.py --device GPU --epochs 10
-.venv-train\Scripts\python.exe finetune/train_attribute.py --device GPU --epochs 15
-.venv-train\Scripts\python.exe finetune/train_mask.py --device GPU --epochs 25
-
-# 训练完成后汇总曲线与指标
-.venv-train\Scripts\python.exe finetune/training_report.py --det-log ... --attr-log ... --mask-log ...
-```
-
-三个模型都是几十 MB 的小模型，数据量也小，上面 epochs 足够收敛（合计约半小时级别）。
-训练侧不做任何在线增强，增强只来自离线尘土化副本。中断续训与导出注意事项见
-[finetune/README.md](finetune/README.md) 第 3 节。
-
-产物写入 `models/finetuned/{person_detector, person_attribute, face_mask}`；
-曲线图与汇总见 `finetune/TRAINING_REPORT.md` 和 `finetune/report/*.png`。
-
-### 模型清单与溯源
-
-微调管线的三个训练对象（推理端当前部署权重 → 微调起点）：
-
-| 环节        | 模型                      | 当前部署权重                                              | 微调起点                                                                                  | 训练框架                   |
-| ----------- | ------------------------- | --------------------------------------------------------- | ----------------------------------------------------------------------------------------- | -------------------------- |
-| ① 人物检测 | PP-YOLOE-S                | `models/finetuned/person_detector`（PIR 部署格式）       | `models/original/person_detector/mot_ppyoloe_s_36e_pipeline.pdparams`（官方可训练权重） | `vendor/PaddleDetection` |
-| ② 人物属性 | PP-HGNet small（26 属性） | `models/finetuned/person_attribute`                      | 官网 `models/human/PPHGNet_small_person_attribute_954_infer` 转回可训练结构             | `vendor/PaddleClas`      |
-| ③ 口罩识别 | YOLOv5s（2 类）           | `models/finetuned/face_mask`（ONNX）                     | 由官网 `models/face_mask_yolov5` 的 ONNX 反建的 YOLOv5s 权重                             | `vendor/yolov5`          |
-
-推理端还有三个**不参与微调**的模型：车辆检测 `models/vehicle/mot_ppyoloe_s_36e_ppvehicle`、
-车辆属性 `models/vehicle/vehicle_attribute_model`、车牌 `models/vehicle/.hyperlpr3`（HyperLPR3）。
-
-每个权重的上游地址、归档 SHA-256、本地文件哈希和授权边界记录在
-[`models/MODEL_SOURCES.md`](models/MODEL_SOURCES.md) 及各目录的 `SOURCE.md`；
-训练数据来源见 [`dataset/DATASETS.md`](dataset/DATASETS.md)。
-
-## 三、推理
-
-推理分两层，均与训练管线解耦：
-
-- `inference/`：识别管线本体（约四百行），输入图片、输出结构化中文业务结果
-  （不含框、置信度等模型细节）。也可作为命令行批量工具单独使用。
-- `service/`：FastAPI 异步服务，把管线包装成 HTTP 接口，面向视频抽帧/抓拍流：
-  提交图片立即返回 `session_id`，结果凭 `session_id` 轮询获取；队列有硬上限，
-  满了返回 429 拒收，高并发抓拍不会把服务压垮。
-- `deploy/`：Docker 打包（Paddle GPU 镜像），与业务代码隔离。
-
-接口定义、字段示例、视频抽帧客户端用法见
-[**service/README.md**](service/README.md)；命令行批量用法与模型替换见
-[**inference/README.md**](inference/README.md)；Docker 部署与分享见
-[**deploy/DOCKER_TUTORIAL.md**](deploy/DOCKER_TUTORIAL.md)。
-
-```powershell
-# 命令行批量（本地直出）
-python inference/run.py          # 读 easy_test/ → 原子写 inference/result.json
-
-# HTTP 服务（生产用法）
-python service/app.py            # 启动服务，默认 :8000
-python service/video_client.py --source video.mp4 --fps 2 --output results.jsonl
-```
-
-输出速览（字段完整定义与示例在 inference/README.md）：
-
-- `result.json` / 接口 `result` 字段：`图片位置`、`处理耗时（毫秒）`、
-  `识别内容`（`行人` 数组：性别/年龄/朝向/眼镜/帽子/口罩/包/上装/下装/鞋靴等；
-  `车辆` 数组：颜色/车型/车牌）。
-
-验收微调结果后，只改 `inference/config.py` 里的 `PERSON_DETECTOR_DIR`、
-`PERSON_ATTRIBUTE_DIR`、`FACE_MASK_DIR`（属性模型另把
-`PERSON_ATTRIBUTE_CROP_SCALE` 改为 1.0）即完成切换；回滚时改回原值。
-模型一律按目录名指定，不做哈希校验。
-
-## 目录结构与中间产物位置
-
-```
-dataset/
-  raw/                          # 原始数据集，程序只读（AIZOO、PRW 等）
-  processed/
-    1_detection/
-      candidates.json           # ① 模型初检的人物框（待人工核对）
-      confirmed.json            # ① 人工确认的整图与人物框 = 检测训练金标准
-    2_attribute/
-      images/                   # ② 人物裁剪小图（检测确认时生成）
-      candidates.json           # ② 属性模型对小图的预标注（待人工核对）
-      gold.json                 # ② 人工确认的属性金标准
-    3_mask/
-      images/                   # ③ 带上下文的人脸裁剪（口罩核对保存时生成）
-      candidates.json           # ③ AIZOO 导入的整图与人脸框（待人工核对）
-      gold.json                 # ③ 人工确认的口罩金标准
-    4_augmented/
-      detection/ attribute/ mask/
-        images/                 # ④ 尘土化/昏黄化后的图片副本
-        annotations.json        # ④ 与源完全一致的标签（每次生成重建整个环节）
-    5_export/
-      person_detection_coco/    # 人物检测训练用 COCO（images/ + annotations/instances_*.json）
-    _legacy/                    # 旧版数据归档，不参与任何流程
-finetune/                       # 微调侧：数据准备、标注 WebUI、训练、训练报告（见 finetune/README.md）
-inference/                      # 推理侧：识别管线本体，只读模型和图片（见 inference/README.md）
-service/                        # FastAPI 异步识别服务 + 视频抽帧客户端（见 service/README.md）
-deploy/                         # Docker 打包（Paddle GPU 镜像）与部署教学（见 deploy/DOCKER_TUTORIAL.md）
-models/                         # 全部模型权重（original + finetuned，来源见 MODEL_SOURCES.md）
-vendor/                         # PaddleClas / PaddleDetection / yolov5 源码（仅训练用）
-easy_test/                      # 推理测试图片
-```
-
-所有中间 JSON 都是 COCO 风格：`info / images / annotations / categories`，
-框一律为 `bbox = [x, y, w, h]`；属性标注在 annotation 里扩展 `attributes` 字典
-（26 项布尔值，固定顺序），口罩用 `category_id`（1=未佩戴，2=佩戴）区分。
-每张裁剪图带 `source_image_id`，指回原图，用于 train/val/test 划分继承。
-
-## Linux / macOS 使用方式
-
-代码内所有路径都从项目根目录推导，没有写死的盘符，整目录拷贝即可迁移。差异只在
-环境搭建和启动命令：
+## 快速运行
 
 ```bash
-# 推理环境（CPU 即可；Linux 有 NVIDIA 显卡 + nvidia-container-toolkit 时可保持 GPU）
-uv sync                                            # 或：uv export | .venv/bin/pip install -r /dev/stdin
+DOCKER_BUILDKIT=1 docker build \
+  -f deploy/Dockerfile \
+  -t person-vehicle-recognition:v2.0.0 .
 
-# 训练环境（仅 Linux 建议 GPU；macOS 用 --device CPU）
-python3 -m venv .venv-train
-.venv-train/bin/pip install paddlepaddle-gpu torch --index-url <对应 CUDA 版本的索引>
-
-# 之后的命令与 Windows 完全一致，只把 python 路径换成：
-.venv/bin/python finetune/review_server.py            # 标注 WebUI
-.venv-train/bin/python finetune/train_person_detector.py --device GPU
-.venv/bin/python inference/run.py
-.venv/bin/python service/app.py                       # FastAPI 服务
+docker run -d --name pvr-v2 --gpus all \
+  --restart unless-stopped -p 8000:8000 \
+  -v pvr-engine-cache:/var/cache/pvr \
+  person-vehicle-recognition:v2.0.0
 ```
 
-- Windows 专用的 CUDA DLL 注册（`configure_runtime_dlls`）在非 Windows 平台自动跳过，
-  无需处理。
-- `.torch-cu130/` 是本机 Windows 的手工 torch 目录，Linux/macOS 上删掉，正常 pip 安装即可。
-- macOS 无 CUDA，Paddle/torch 都走 CPU；口罩与车牌 ONNX 模型本来就只用 CPU。
-- 生产部署建议直接用 `deploy/` 下的 Dockerfile 构建 Paddle GPU 镜像（训练侧不进镜像），
-  详见 [deploy/DOCKER_TUTORIAL.md](deploy/DOCKER_TUTORIAL.md)；训练容器化时把 `dataset/` 和 `models/`
-  以卷挂载进容器（`raw` 可只读），代码无需改动。
+首次启动构建本机 engine，期间 `/v1/health` 返回 503；完成后才进入 ready。构建、运行、离线分发和 A30 换机步骤见 [deploy/DOCKER_TUTORIAL.md](deploy/DOCKER_TUTORIAL.md)。
+
+## API
+
+```bash
+# 提交后立即返回 session_id
+curl -F 'file=@sample.jpg;type=image/jpeg' http://127.0.0.1:8000/v1/tasks
+
+# 独立查询结果
+curl http://127.0.0.1:8000/v1/tasks/<session_id>
+```
+
+高吞吐客户端使用 `POST /v1/task-batches` 的版本化长度前缀二进制协议，一次最多 64 张；`POST /v1/results:batch` 一次查询最多 512 个 ID。完整协议、限制和状态码见 [service/README.md](service/README.md)。
+
+## 验证原则
+
+发布吞吐是连续 10 分钟内满足以下条件的最高完成速率：有效图片错误率为 0、完成/接受至少 99.9%、p95 总延迟不超过 1 秒、无 OOM、稳定负载不出现 429。另以两倍负载验证快速 429、内存有界和恢复能力。
+
+RTX 3080 Ti 只用于镜像、功能、稳定性和相对优化预验。A30 24GB 的最终数字必须在 A30 上重新构建 engine 后实测；仓库不会预先宣称单卡“数千张/秒”。实例数按：
+
+```text
+ceil(目标吞吐 / (单实例实测完成吞吐 × 0.7))
+```
+
+2026-08-20 的 3080 Ti 短测得到约 154 图/s 的饱和完成能力；160 图/s 固定输入短扫的 p95 约 580ms，但 43 图严格回归仍有 7 图差异，因此它既不是 10 分钟发布值，也不能外推为 A30 精度或吞吐结论。完整记录见部署手册的“本次 RTX 3080 Ti 预验记录”。
+
+## 目录
+
+```text
+model_export/  既有权重到动态 ONNX、checker 和 manifest
+native/        C++20/CUDA/TensorRT worker
+service/       FastAPI 薄接口
+pvr_api/       批协议与共享类型
+client/        视频抽帧批提交客户端
+benchmarks/    HTTP 端到端验收工具
+deploy/        唯一 Dockerfile、入口与部署文档
+tests/         协议和服务边界测试
+```
+
+Python 依赖固定使用 `uv 0.11.2` 和锁文件，PyPI 默认清华源；构建过程不调用 `pip`。Ubuntu apt 使用中科大源。

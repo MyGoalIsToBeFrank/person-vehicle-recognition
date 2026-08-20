@@ -1,33 +1,68 @@
-# Docker 构建上下文白名单：默认排除一切，只放行推理镜像所需文件。
+# Deny by default. The build has no reason to see datasets, finetune code,
+# local environments, logs, credentials, Git metadata, or generated engines.
 *
 
-# 推理端代码与服务
-!inference/
-!service/
-!deploy/
-inference/__pycache__/
-inference/logs/
-inference/result*.json
-service/__pycache__/
+!pyproject.toml
+!uv.lock
+!pvr_api/**
+!service/**
+!client/**
+!benchmarks/**
+!native/**
+!model_export/**
+!deploy/**
 
-# 模型目录里只保留 Paddle 部署权重（训练 checkpoint、ONNX 探索产物不进镜像）
+!vendor/
+vendor/*
+!vendor/PaddleDetection/**
+
 !models/
 models/*
+
 !models/finetuned/
-!models/vehicle/
 models/finetuned/*
-!models/finetuned/person_detector/
+!models/finetuned/person_detector_checkpoints/
+models/finetuned/person_detector_checkpoints/*
+!models/finetuned/person_detector_checkpoints/model_final.pdparams
+!models/finetuned/person_detector_checkpoints/model_final.pdstates
 !models/finetuned/person_attribute/
-!models/finetuned/face_mask/
 models/finetuned/person_attribute/*
+!models/finetuned/person_attribute/best.pdparams
 !models/finetuned/person_attribute/inference.json
 !models/finetuned/person_attribute/inference.pdiparams
+!models/finetuned/face_mask/
 models/finetuned/face_mask/*
-!models/finetuned/face_mask/face_mask_detection.onnx
-!models/finetuned/face_mask/synset.txt
+!models/finetuned/face_mask/best.pt
+!models/finetuned/face_mask/face_mask_detection_dynamic.onnx
+
+!models/onnx/
+models/onnx/*
+!models/onnx/vehicle_detector/
+models/onnx/vehicle_detector/*
+!models/onnx/vehicle_detector/vehicle_detector.onnx
+!models/onnx/vehicle_attribute/
+models/onnx/vehicle_attribute/*
+!models/onnx/vehicle_attribute/vehicle_attribute.onnx
+
+!models/vehicle/
 models/vehicle/*
 !models/vehicle/mot_ppyoloe_s_36e_ppvehicle/
+models/vehicle/mot_ppyoloe_s_36e_ppvehicle/*
+!models/vehicle/mot_ppyoloe_s_36e_ppvehicle/model.pdmodel
+!models/vehicle/mot_ppyoloe_s_36e_ppvehicle/model.pdiparams
 !models/vehicle/vehicle_attribute_model/
-!models/vehicle/.hyperlpr3/
-models/vehicle/mot_ppyoloe_s_36e_ppvehicle/SOURCE.md
-models/vehicle/vehicle_attribute_model/SOURCE.md
+models/vehicle/vehicle_attribute_model/*
+!models/vehicle/vehicle_attribute_model/model.pdmodel
+!models/vehicle/vehicle_attribute_model/model.pdiparams
+!models/vehicle/plate_det/
+models/vehicle/plate_det/*
+!models/vehicle/plate_det/inference.pdmodel
+!models/vehicle/plate_det/inference.pdiparams
+!models/vehicle/plate_rec/
+models/vehicle/plate_rec/*
+!models/vehicle/plate_rec/inference.pdmodel
+!models/vehicle/plate_rec/inference.pdiparams
+!models/vehicle/plate_rec/rec_word_dict.txt
+
+**/__pycache__/
+**/*.pyc

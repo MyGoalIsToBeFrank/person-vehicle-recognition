@@ -1,241 +1,289 @@
-#!/usr/bin/env python3
-"""FastAPI 异步识别服务：提交图片拿 sessionId，凭 sessionId 轮询结果。
-
-面向视频抽帧/抓拍流：上游逐帧 POST 到 /v1/tasks，立即拿到 sessionId；
-随后用 GET /v1/tasks/{session_id} 轮询，识别完成后取走结构化中文结果。
-提交与识别完全异步。识别在单个后台 worker 里串行执行（GPU 模型非线程安全）。
-
-防积压崩溃（上游可能一秒几千张，远超 GPU 吞吐）：
-
-- 识别队列有硬上限（环境变量 ``BACKLOG``，默认 512）。队列满时 POST 立即
-  返回 **429**，上游应丢弃该帧或稍后重试——服务宁可拒收也绝不无限堆积。
-- 结果只在内存保留最近 ``MAX_KEPT`` 条（默认 20000，超出按提交顺序淘汰），
-  调用方应及时取走。
-- 单帧解码或识别失败只标记该帧 ``error``，不影响后续帧。
-
-吞吐：``WORKERS``（默认 4）个**独立进程**（绕开 Python GIL 限制，CPU 预处理
-才能真正并行），每个进程持有一整套模型实例（启动时串行创建，避免并发初始化
-冲突）；主进程的派发线程把队列里的帧攒成最多 ``BATCH_SIZE``（默认 8）张一批
-发给空闲进程批量推理——整图预处理在行人/车辆两个检测器间共享，全部裁片的
-属性识别跨图合并成大批。GPU 显存约占用 WORKERS × 2GB。
-
-接口：
-
-- `POST /v1/tasks`：multipart 表单字段 `file` 上传一张图片。
-  202 返回 `{"session_id": "...", "status": "pending"}`；队列满返回 429。
-- `GET /v1/tasks/{session_id}`：返回 `{"session_id", "status", ...}`。
-  `status` 为 `pending` / `done`（带 `result`、`elapsed_ms`）/ `error`（带 `error`）。
-  `result` 结构与批量版 result.json 的 `识别内容` 字段完全一致
-  （`行人` / `车辆` 两个数组，字段定义见 inference/README.md）。
-- `GET /v1/health`：服务自检，返回设备、队列水位与结果保有量。
-
-本地启动：`python service/app.py`（自动切到根目录 .venv）；
-容器内由 deploy/docker_entrypoint.sh 直接拉起 uvicorn。
-"""
+"""Thin asynchronous HTTP boundary around the single native GPU engine."""
 
 from __future__ import annotations
 
-import os
-import sys
-import threading
-import multiprocessing
-import queue
-import time
-import uuid
-from collections import OrderedDict
-from pathlib import Path
-from typing import Any
+import asyncio
+from contextlib import asynccontextmanager
+from typing import Any, Awaitable, Callable, Protocol
 
-sys.dont_write_bytecode = True
-HERE = Path(__file__).resolve().parent
-PROJECT_ROOT = HERE.parent
-sys.path.insert(0, str(PROJECT_ROOT / "inference"))
+from fastapi import FastAPI, File, HTTPException, Request, Response, UploadFile
+from fastapi.responses import PlainTextResponse
+from pydantic import BaseModel, Field
 
-import config as project_config  # noqa: E402
+from pvr_api.protocol import (
+    ProtocolError,
+    decode_batch,
+    exceeds_pixel_limit,
+    sniff_media_type,
+)
+from service.settings import Settings
 
 
-def enter_project_environment() -> None:
-    """与 run.py 同款的环境切换：从系统 Python 启动时切到根目录 .venv。"""
-    if os.environ.get("INFERENCE_RUN_IN_PLACE") == "1":
-        return
-    import shutil
-    import subprocess
+class Engine(Protocol):
+    def submit(self, payload: bytes, media_type: int) -> str: ...
 
-    python_name = "python.exe" if os.name == "nt" else "python"
-    python_dir = "Scripts" if os.name == "nt" else "bin"
-    expected_python = project_config.INFERENCE_VENV_DIR / python_dir / python_name
-    if expected_python.is_file():
-        try:
-            if Path(sys.executable).resolve() == expected_python.resolve():
-                return
-        except OSError:
-            pass
-        completed = subprocess.run(
-            [str(expected_python), str(__file__), *sys.argv[1:]],
-            cwd=PROJECT_ROOT,
-        )
-        raise SystemExit(completed.returncode)
-    raise RuntimeError("没有找到根目录 .venv；请先 uv sync 或在容器内运行。")
+    def submit_many(
+        self, payloads: list[bytes], media_types: list[int]
+    ) -> list[str]: ...
+
+    def get(self, session_id: str) -> dict[str, Any] | None: ...
+
+    def get_many(self, session_ids: list[str]) -> list[dict[str, Any] | None]: ...
+
+    def health(self) -> dict[str, Any]: ...
+
+    def prometheus(self) -> str: ...
+
+    def close(self) -> None: ...
 
 
-_DLL_HANDLES: list[Any] = []
-enter_project_environment()
-_DLL_HANDLES.extend(project_config.configure_runtime_dlls(project_config.INFERENCE_VENV_DIR))
-
-import cv2  # noqa: E402
-import numpy as np  # noqa: E402
-from fastapi import FastAPI, File, HTTPException, UploadFile  # noqa: E402
-
-from pipeline import RecognitionPipeline  # noqa: E402
-
-BACKLOG = int(os.environ.get("BACKLOG", "512"))
-MAX_KEPT = int(os.environ.get("MAX_KEPT", "20000"))
-WORKERS = int(os.environ.get("WORKERS", "4"))
-BATCH_SIZE = int(os.environ.get("BATCH_SIZE", "8"))
-
-app = FastAPI(title="person-vehicle-recognition", version="1.0")
-
-_tasks: "queue.Queue[tuple[str, np.ndarray]]" = queue.Queue(maxsize=BACKLOG)
-_results: "OrderedDict[str, dict[str, Any]]" = OrderedDict()
-_results_lock = threading.Lock()
-
-# 跨进程队列在 startup 里创建（fork/spawn 语义不同，避免模块级创建）。
-_mp_task_q = None
-_mp_result_q = None
+class BatchResultRequest(BaseModel):
+    session_ids: list[str] = Field(min_length=1, max_length=512)
 
 
-def _store(session_id: str, record: dict[str, Any]) -> None:
-    with _results_lock:
-        _results[session_id] = record
-        _results.move_to_end(session_id)
-        while len(_results) > MAX_KEPT:
-            _results.popitem(last=False)
+class SingleImageBodyLimitMiddleware:
+    """Bound multipart bytes before Starlette creates a temporary upload file."""
 
+    def __init__(
+        self, app: Any, *, limit: int, slots: asyncio.Semaphore
+    ) -> None:
+        self.app = app
+        self.limit = limit
+        self.slots = slots
 
-def _inference_process(task_q, result_q, device: str) -> None:
-    """识别子进程入口：独占一套模型实例，收一批、推理、回传结果。"""
-    pipeline = RecognitionPipeline(
-        device=device,
-        person_detector_dir=project_config.PERSON_DETECTOR_DIR,
-        person_attribute_dir=project_config.PERSON_ATTRIBUTE_DIR,
-        vehicle_detector_dir=project_config.VEHICLE_DETECTOR_DIR,
-        vehicle_attribute_dir=project_config.VEHICLE_ATTRIBUTE_DIR,
-        face_mask_dir=project_config.FACE_MASK_DIR,
-        plate_model_dir=project_config.PLATE_MODEL_DIR,
-        person_attribute_crop_scale=project_config.PERSON_ATTRIBUTE_CROP_SCALE,
-    )
-    while True:
-        batch = task_q.get()
-        started = time.perf_counter()
-        try:
-            contents = pipeline.recognize_batch([image for _, image in batch])
-        except Exception:  # 批失败时逐张降级，隔离坏帧不影响整批
-            contents = []
-            for session_id, image in batch:
-                try:
-                    contents.append(pipeline.recognize_array(image))
-                except Exception as exc:
-                    result_q.put(
-                        (session_id, {"status": "error", "error": f"{type(exc).__name__}: {exc}"})
+    async def __call__(
+        self,
+        scope: dict[str, Any],
+        receive: Callable[[], Awaitable[dict[str, Any]]],
+        send: Callable[[dict[str, Any]], Awaitable[None]],
+    ) -> None:
+        if scope.get("type") != "http" or scope.get("method") != "POST" or scope.get(
+            "path"
+        ) != "/v1/tasks":
+            await self.app(scope, receive, send)
+            return
+
+        async with self.slots:
+            body = bytearray()
+            while True:
+                message = await receive()
+                if message["type"] == "http.disconnect":
+                    return
+                chunk = message.get("body", b"")
+                if len(body) + len(chunk) > self.limit:
+                    payload = b'{"detail":"multipart body limit exceeded"}'
+                    await send(
+                        {
+                            "type": "http.response.start",
+                            "status": 413,
+                            "headers": [
+                                (b"content-type", b"application/json"),
+                                (b"content-length", str(len(payload)).encode("ascii")),
+                                (b"connection", b"close"),
+                            ],
+                        }
                     )
-                    contents.append(None)
-        per_image_ms = round((time.perf_counter() - started) * 1000.0 / len(batch), 3)
-        for (session_id, _), content in zip(batch, contents):
-            if content is None:
-                continue  # 降级路径里已标记 error
-            result_q.put(
-                (session_id, {"status": "done", "result": content, "elapsed_ms": per_image_ms})
-            )
+                    await send({"type": "http.response.body", "body": payload})
+                    return
+                body.extend(chunk)
+                if not message.get("more_body", False):
+                    break
+
+            delivered = False
+
+            async def replay() -> dict[str, Any]:
+                nonlocal delivered
+                if delivered:
+                    return {"type": "http.disconnect"}
+                delivered = True
+                return {
+                    "type": "http.request",
+                    "body": bytes(body),
+                    "more_body": False,
+                }
+
+            await self.app(scope, replay, send)
 
 
-def _dispatcher() -> None:
-    """主进程派发：从有界内存队列攒批，送进跨进程队列（满了自然阻塞，
-    背压一路传导回 POST 的 429）。"""
-    while True:
-        first = _tasks.get()
-        batch = [first]
-        while len(batch) < BATCH_SIZE:
-            try:
-                batch.append(_tasks.get_nowait())
-            except queue.Empty:
-                break
-        _mp_task_q.put(batch)
+async def _read_limited_body(request: Request, limit: int) -> bytes:
+    """Read an ASGI body without allowing an omitted length to bypass the cap."""
+    body = bytearray()
+    async for chunk in request.stream():
+        if len(body) + len(chunk) > limit:
+            raise HTTPException(status_code=413, detail="batch byte limit exceeded")
+        body.extend(chunk)
+    return bytes(body)
 
 
-def _collector() -> None:
-    while True:
-        session_id, record = _mp_result_q.get()
-        _store(session_id, record)
-
-
-@app.on_event("startup")
-def _startup() -> None:
-    global _mp_task_q, _mp_result_q
-    device = os.environ.get("DEVICE", project_config.DEVICE).upper()
-    # 必须 spawn：fork 会继承父进程已初始化的 CUDA 状态，
-    # 子进程 create_predictor 直接报 cudaErrorInitializationError。
-    ctx = multiprocessing.get_context("spawn")
-    # 跨进程任务队列按批计，最多积压 WORKERS×2 批，防止大图数组在内存里堆积。
-    _mp_task_q = ctx.Queue(maxsize=WORKERS * 2)
-    _mp_result_q = ctx.Queue()
-    for _ in range(WORKERS):  # 串行拉起，避免多 predictor 并发初始化冲突
-        ctx.Process(
-            target=_inference_process,
-            args=(_mp_task_q, _mp_result_q, device),
-            daemon=True,
-        ).start()
-    threading.Thread(target=_dispatcher, daemon=True).start()
-    threading.Thread(target=_collector, daemon=True).start()
-
-
-@app.post("/v1/tasks", status_code=202)
-def submit(file: UploadFile = File(...)) -> dict[str, str]:
-    # 同步端点：FastAPI 放进线程池执行，解码不阻塞事件循环，提交路径可并行。
-    payload = file.file.read()
-    array = np.frombuffer(payload, dtype=np.uint8)
-    image = cv2.imdecode(array, cv2.IMREAD_COLOR)
-    if image is None:
-        raise HTTPException(status_code=400, detail="图片损坏或格式不受支持")
-    session_id = uuid.uuid4().hex
+def _load_native_engine(settings: Settings) -> Engine:
     try:
-        _tasks.put_nowait((session_id, image))
-    except queue.Full:
-        raise HTTPException(
+        import pvr_native
+    except ImportError as exc:
+        raise RuntimeError("pvr_native extension is not installed") from exc
+    return pvr_native.Engine(settings.native_config())
+
+
+def _translate_native_error(exc: Exception) -> HTTPException:
+    name = type(exc).__name__
+    if name == "QueueFullError":
+        return HTTPException(
             status_code=429,
-            detail=f"识别队列已满（{BACKLOG}），请丢弃该帧或稍后重试",
+            detail="recognition queue is full",
+            headers={"Retry-After": "1"},
         )
-    _store(session_id, {"status": "pending"})
-    return {"session_id": session_id, "status": "pending"}
+    if name == "NotReadyError":
+        return HTTPException(status_code=503, detail="native engine is not ready")
+    if name == "PayloadTooLargeError":
+        return HTTPException(status_code=413, detail=str(exc))
+    raise exc
 
 
-@app.get("/v1/tasks/{session_id}")
-def query(session_id: str) -> dict[str, Any]:
-    with _results_lock:
-        record = _results.get(session_id)
-    if record is None:
-        raise HTTPException(status_code=404, detail="session_id 不存在或已被淘汰")
-    return {"session_id": session_id, **record}
+def create_app(
+    *, settings: Settings | None = None, engine: Engine | None = None
+) -> FastAPI:
+    settings = settings or Settings.from_env()
+    ingest_slots = asyncio.Semaphore(settings.ingest_concurrency)
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        app.state.engine = engine or _load_native_engine(settings)
+        app.state.submit_slots = asyncio.Semaphore(settings.submit_concurrency)
+        try:
+            yield
+        finally:
+            app.state.engine.close()
+
+    application = FastAPI(
+        title="person-vehicle-recognition",
+        version="2.0.0",
+        lifespan=lifespan,
+    )
+    # One MiB covers multipart boundaries and headers while the image itself
+    # remains governed by max_image_bytes in the route and native engine.
+    application.add_middleware(
+        SingleImageBodyLimitMiddleware,
+        limit=settings.max_image_bytes + (1 << 20),
+        slots=ingest_slots,
+    )
+
+    @application.post("/v1/tasks", status_code=202)
+    async def submit(request: Request, file: UploadFile = File(...)) -> dict[str, str]:
+        payload = await file.read(settings.max_image_bytes + 1)
+        if len(payload) > settings.max_image_bytes:
+            raise HTTPException(status_code=413, detail="image byte limit exceeded")
+        media_type = sniff_media_type(payload)
+        if media_type is None:
+            raise HTTPException(status_code=415, detail="unsupported image format")
+        if exceeds_pixel_limit(payload, media_type, settings.max_image_pixels):
+            raise HTTPException(status_code=413, detail="image pixel limit exceeded")
+        try:
+            async with request.app.state.submit_slots:
+                session_id = await asyncio.to_thread(
+                    request.app.state.engine.submit, payload, int(media_type)
+                )
+        except Exception as exc:
+            raise _translate_native_error(exc) from exc
+        return {"session_id": session_id, "status": "pending"}
+
+    @application.post("/v1/task-batches", status_code=202)
+    async def submit_batch(request: Request) -> dict[str, object]:
+        content_type = request.headers.get("content-type", "").split(";", 1)[0]
+        if content_type != "application/vnd.pvr.tasks-v1":
+            raise HTTPException(status_code=415, detail="unsupported batch content type")
+        declared = request.headers.get("content-length")
+        if declared:
+            try:
+                declared_size = int(declared)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail="invalid content-length") from exc
+            if declared_size > settings.max_batch_bytes:
+                raise HTTPException(status_code=413, detail="batch byte limit exceeded")
+        async with ingest_slots:
+            payload = await _read_limited_body(request, settings.max_batch_bytes)
+            try:
+                images = decode_batch(
+                    payload,
+                    max_images=settings.max_batch_images,
+                    max_image_bytes=settings.max_image_bytes,
+                    max_batch_bytes=settings.max_batch_bytes,
+                    max_image_pixels=settings.max_image_pixels,
+                )
+            except ProtocolError as exc:
+                message = str(exc)
+                status = 413 if "limit exceeded" in message else 415
+                raise HTTPException(status_code=status, detail=message) from exc
+            try:
+                async with request.app.state.submit_slots:
+                    ids = await asyncio.to_thread(
+                        request.app.state.engine.submit_many,
+                        [image for _, image in images],
+                        [int(media_type) for media_type, _ in images],
+                    )
+            except Exception as exc:
+                raise _translate_native_error(exc) from exc
+        return {"version": 1, "session_ids": ids, "status": "pending"}
+
+    @application.get("/v1/tasks/{session_id}")
+    async def query(request: Request, session_id: str) -> dict[str, Any]:
+        record = await asyncio.to_thread(request.app.state.engine.get, session_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="unknown session_id")
+        if record.get("status") == "expired":
+            raise HTTPException(status_code=410, detail="result expired")
+        return {"session_id": session_id, **record}
+
+    @application.post("/v1/results:batch")
+    async def query_batch(
+        request: Request, body: BatchResultRequest
+    ) -> dict[str, object]:
+        records = await asyncio.to_thread(
+            request.app.state.engine.get_many, body.session_ids
+        )
+        results: list[dict[str, Any]] = []
+        for session_id, record in zip(body.session_ids, records, strict=True):
+            if record is None:
+                results.append({"session_id": session_id, "status": "unknown"})
+            else:
+                results.append({"session_id": session_id, **record})
+        return {"results": results}
+
+    @application.get("/v1/health")
+    async def health(request: Request, response: Response) -> dict[str, Any]:
+        state = await asyncio.to_thread(request.app.state.engine.health)
+        state.setdefault("queue", {}).update(
+            {
+                "max_images": settings.max_queue_images,
+                "max_bytes": settings.max_queue_bytes,
+            }
+        )
+        state.setdefault("result_cache", {}).update(
+            {
+                "max_bytes": settings.max_result_bytes,
+                "max_records": settings.max_result_records,
+                "ttl_seconds": settings.result_ttl_seconds,
+            }
+        )
+        state["request_limits"] = {
+            "max_image_bytes": settings.max_image_bytes,
+            "max_image_pixels": settings.max_image_pixels,
+            "max_batch_images": settings.max_batch_images,
+            "max_batch_bytes": settings.max_batch_bytes,
+        }
+        if not state.get("ready", False):
+            response.status_code = 503
+        return state
+
+    @application.get("/metrics", response_class=PlainTextResponse)
+    async def metrics(request: Request) -> str:
+        return await asyncio.to_thread(request.app.state.engine.prometheus)
+
+    return application
 
 
-@app.get("/v1/health")
-def health() -> dict[str, Any]:
-    return {
-        "status": "ok",
-        "device": os.environ.get("DEVICE", project_config.DEVICE).upper(),
-        "workers": WORKERS,
-        "batch_size": BATCH_SIZE,
-        "backlog": BACKLOG,
-        "queue": _tasks.qsize(),
-        "kept_results": len(_results),
-    }
+app = create_app()
 
 
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(
-        "app:app",
-        host="0.0.0.0",
-        port=int(os.environ.get("PORT", "8000")),
-        log_level="info",
-    )
+    uvicorn.run("service.app:app", host="0.0.0.0", port=Settings.from_env().port)
