@@ -26,6 +26,9 @@ import config as project_config  # noqa: E402
 
 def enter_project_environment() -> None:
     """从系统 Python 启动时，切换到根目录已有的项目环境。"""
+    # Docker 镜像里依赖直接装在系统 Python，由 Dockerfile 置位，跳过环境切换。
+    if os.environ.get("INFERENCE_RUN_IN_PLACE") == "1":
+        return
     python_name = "python.exe" if os.name == "nt" else "python"
     python_dir = "Scripts" if os.name == "nt" else "bin"
     expected_python = project_config.INFERENCE_VENV_DIR / python_dir / python_name

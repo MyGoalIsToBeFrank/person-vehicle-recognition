@@ -12,10 +12,9 @@ import numpy as np
 from model_adapters import (
     Detection,
     FaceMaskModel,
-    PaddleAttributeModel,
-    PaddleDetector,
+    OnnxAttributeModel,
+    OnnxDetector,
     PlateRecognizer,
-    paddle_model_files,
 )
 
 
@@ -103,19 +102,17 @@ class RecognitionPipeline:
         vehicle_attribute_dir = Path(vehicle_attribute_dir)
         face_mask_dir = Path(face_mask_dir)
         plate_model_dir = Path(plate_model_dir)
-        self.person_detector = PaddleDetector(
+        self.person_detector = OnnxDetector(
             person_detector_dir,
             device,
         )
-        person_model, person_params = paddle_model_files(person_attribute_dir, "inference")
-        self.person_attributes = PaddleAttributeModel(person_model, person_params, (192, 256), device)
-        self.vehicle_detector = PaddleDetector(
+        self.person_attributes = OnnxAttributeModel(person_attribute_dir, (192, 256), device)
+        self.vehicle_detector = OnnxDetector(
             vehicle_detector_dir,
             device,
         )
-        vehicle_model, vehicle_params = paddle_model_files(vehicle_attribute_dir, "model")
-        self.vehicle_attributes = PaddleAttributeModel(
-            vehicle_model, vehicle_params, (256, 192), device
+        self.vehicle_attributes = OnnxAttributeModel(
+            vehicle_attribute_dir, (256, 192), device
         )
         self.face_mask = FaceMaskModel(face_mask_dir)
         self.plate = PlateRecognizer(plate_model_dir)

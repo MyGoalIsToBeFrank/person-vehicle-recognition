@@ -1,0 +1,16 @@
+# 推理端容器依赖（Linux，GPU 自动探测、无卡回落 CPU）。
+# onnxruntime-gpu 的 CUDA/cuDNN 动态库来自下面的 nvidia-* 轮子（cu12 + cudnn9），
+# 容器内无需安装 CUDA，宿主只要有 NVIDIA 驱动 + nvidia-container-toolkit 即可。
+onnxruntime-gpu>=1.23,<2
+nvidia-cudnn-cu12
+nvidia-cublas-cu12
+nvidia-cufft-cu12
+nvidia-curand-cu12
+nvidia-cuda-runtime-cu12
+numpy<2
+opencv-python-headless==4.6.0.66
+# hyperlpr3 的间接依赖（它声明依赖 CPU 版 onnxruntime，会覆盖 -gpu 版，
+# 所以在 Dockerfile 里用 --no-deps 单独装 hyperlpr3 本体）。
+requests
+tqdm
+setuptools

@@ -1,8 +1,15 @@
-"""推理模型的薄适配层；这里只处理模型文件、张量和运行时。"""
+"""推理模型的薄适配层；这里只处理模型文件、张量和运行时。
+
+推理引擎是 onnxruntime 单引擎：检测、属性、口罩、车牌全部消费 ONNX。
+GPU 自动探测：装的是 onnxruntime-gpu 且有可用显卡时走 CUDAExecutionProvider，
+否则静默回落 CPUExecutionProvider。Paddle 相关类只为 onnx_regression.py
+保留做数值基准，惰性导入，Docker 镜像里没有 paddle 也能正常使用本模块。
+"""
 
 from __future__ import annotations
 
 import importlib
+import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -10,7 +17,6 @@ from pathlib import Path
 import cv2
 import numpy as np
 import onnxruntime as ort
-from paddle.inference import Config, create_predictor
 
 
 @dataclass(frozen=True)
@@ -33,6 +39,199 @@ def _require_files(paths: list[Path]) -> None:
         raise FileNotFoundError(f"缺少模型文件，程序不会联网补齐:\n  {formatted}")
 
 
+def onnx_model_file(model_dir: Path) -> Path:
+    """模型目录里必须恰好有一个 .onnx，换模型只需指到新目录。"""
+    candidates = sorted(model_dir.glob("*.onnx"))
+    if len(candidates) != 1:
+        raise FileNotFoundError(
+            f"模型目录需要恰好一个 .onnx 文件: {model_dir} (找到 {len(candidates)} 个)"
+        )
+    return candidates[0]
+
+
+def make_session(model_path: Path, device: str) -> ort.InferenceSession:
+    """按 device 偏好创建会话；GPU 不可用时回落 CPU 并提示实际后端。"""
+    _require_files([model_path])
+    available = ort.get_available_providers()
+    if device == "GPU" and "CUDAExecutionProvider" in available:
+        providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+    else:
+        providers = ["CPUExecutionProvider"]
+    session = ort.InferenceSession(str(model_path), providers=providers)
+    active = session.get_providers()[0]
+    if device == "GPU" and active != "CUDAExecutionProvider":
+        print(f"警告: {model_path.name} 未能使用 GPU，实际后端 {active}")
+    return session
+
+
+def _onnx_run(session: ort.InferenceSession, inputs: dict[str, np.ndarray]) -> list[np.ndarray]:
+    names = {item.name for item in session.get_inputs()}
+    unexpected = names - set(inputs)
+    if unexpected:
+        raise RuntimeError(f"模型出现未知输入: {sorted(unexpected)}")
+    return session.run(
+        None,
+        {name: np.ascontiguousarray(inputs[name]) for name in names},
+    )
+
+
+def _multiclass_nms_single_class(
+    boxes: np.ndarray,
+    scores: np.ndarray,
+    *,
+    score_threshold: float,
+    nms_threshold: float,
+    nms_top_k: int,
+    keep_top_k: int,
+) -> np.ndarray:
+    """复刻 multiclass_nms3 的单类别语义（normalized=True，面积不加 1）。
+
+    boxes: [8400,4]，scores: [8400]；返回 [N,6]，每行 label,score,x1,y1,x2,y2。
+    """
+    flat_scores = scores.reshape(-1)
+    flat_boxes = boxes.reshape(-1, 4)
+    selected = np.flatnonzero(flat_scores > score_threshold)
+    if selected.size == 0:
+        return np.zeros((0, 6), dtype=np.float32)
+    order = selected[np.argsort(flat_scores[selected], kind="stable")[::-1]]
+    order = order[:nms_top_k]
+
+    kept: list[int] = []
+    while order.size:
+        current = int(order[0])
+        kept.append(current)
+        if order.size == 1:
+            break
+        rest = order[1:]
+        left = np.maximum(flat_boxes[current, 0], flat_boxes[rest, 0])
+        top = np.maximum(flat_boxes[current, 1], flat_boxes[rest, 1])
+        right = np.minimum(flat_boxes[current, 2], flat_boxes[rest, 2])
+        bottom = np.minimum(flat_boxes[current, 3], flat_boxes[rest, 3])
+        intersection = np.maximum(0.0, right - left) * np.maximum(0.0, bottom - top)
+        current_area = max(
+            0.0, float(flat_boxes[current, 2] - flat_boxes[current, 0])
+        ) * max(0.0, float(flat_boxes[current, 3] - flat_boxes[current, 1]))
+        rest_area = np.maximum(0.0, flat_boxes[rest, 2] - flat_boxes[rest, 0]) * np.maximum(
+            0.0, flat_boxes[rest, 3] - flat_boxes[rest, 1]
+        )
+        union = current_area + rest_area - intersection
+        overlap = np.divide(
+            intersection, union, out=np.zeros_like(intersection), where=union > 0
+        )
+        order = rest[overlap <= nms_threshold]
+
+    kept = sorted(kept, key=lambda index: float(flat_scores[index]), reverse=True)
+    kept = kept[:keep_top_k]
+    rows = np.zeros((len(kept), 6), dtype=np.float32)
+    for row, index in enumerate(kept):
+        rows[row, 0] = 0.0
+        rows[row, 1] = flat_scores[index]
+        rows[row, 2:6] = flat_boxes[index]
+    return rows
+
+
+class OnnxDetector:
+    """PP-YOLOE 检测器的 ONNX 形态。
+
+    两种导出形态都支持：图内带 NMS（输出 [N,6]）或图内只到解码框
+    （输出 boxes [1,8400,4] + scores [1,8400,1]，NMS 用 numpy 复刻，
+    阈值取目录下 nms_config.json，即被裁算子的原始参数）。
+    """
+
+    def __init__(self, model_dir: Path, device: str, threshold: float = 0.5):
+        model_path = onnx_model_file(model_dir)
+        self.session = make_session(model_path, device)
+        self.threshold = threshold
+        nms_path = model_dir / "nms_config.json"
+        self.nms_config = (
+            json.loads(nms_path.read_text(encoding="utf-8")) if nms_path.is_file() else None
+        )
+
+    def predict(self, image: np.ndarray) -> list[Detection]:
+        height, width = image.shape[:2]
+        resized = cv2.resize(image, (640, 640), interpolation=cv2.INTER_CUBIC)
+        rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
+        tensor = rgb.transpose(2, 0, 1)[None].astype(np.float32)
+        scale = np.asarray([[640.0 / height, 640.0 / width]], dtype=np.float32)
+        outputs = _onnx_run(
+            self.session,
+            {"image": tensor, "scale_factor": scale},
+        )
+        rows = self._to_rows(outputs)
+
+        detections: list[Detection] = []
+        for class_id, score, left, top, right, bottom in rows:
+            if int(class_id) != 0 or float(score) < self.threshold:
+                continue
+            if right <= left or bottom <= top:
+                continue
+            detections.append(
+                Detection(
+                    score=float(score),
+                    box=(float(left), float(top), float(right), float(bottom)),
+                )
+            )
+        return detections
+
+    def _to_rows(self, outputs: list[np.ndarray]) -> np.ndarray:
+        candidates = [value for value in outputs if value.ndim == 2 and value.shape[-1] == 6]
+        if len(candidates) == 1:
+            return candidates[0]
+        boxes = [value for value in outputs if value.ndim == 3 and value.shape[-1] == 4]
+        scores = [
+            value
+            for value in outputs
+            if value.ndim == 3 and boxes and value.size == boxes[0].size // 4
+        ]
+        if len(boxes) == 1 and len(scores) == 1:
+            if self.nms_config is None:
+                raise RuntimeError("ONNX 检测图不带 NMS，但目录下缺少 nms_config.json")
+            return _multiclass_nms_single_class(
+                boxes[0],
+                scores[0],
+                score_threshold=float(self.nms_config["score_threshold"]),
+                nms_threshold=float(self.nms_config["nms_threshold"]),
+                nms_top_k=int(self.nms_config["nms_top_k"]),
+                keep_top_k=int(self.nms_config["keep_top_k"]),
+            )
+        shapes = [value.shape for value in outputs]
+        raise RuntimeError(f"检测模型输出结构异常: {shapes}")
+
+
+class OnnxAttributeModel:
+    def __init__(
+        self,
+        model_dir: Path,
+        size: tuple[int, int],
+        device: str,
+    ):
+        self.session = make_session(onnx_model_file(model_dir), device)
+        self.width, self.height = size
+        self.mean = np.asarray([0.485, 0.456, 0.406], dtype=np.float32)[:, None, None]
+        self.std = np.asarray([0.229, 0.224, 0.225], dtype=np.float32)[:, None, None]
+
+    def predict(self, crop: np.ndarray) -> np.ndarray:
+        if crop.size == 0:
+            raise ValueError("属性模型收到空裁片")
+        resized = cv2.resize(crop, (self.width, self.height), interpolation=cv2.INTER_LINEAR)
+        rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
+        tensor = rgb.transpose(2, 0, 1).astype(np.float32) / 255.0
+        tensor = ((tensor - self.mean) / self.std)[None]
+        input_names = [item.name for item in self.session.get_inputs()]
+        if len(input_names) != 1:
+            raise RuntimeError(f"属性模型输入结构异常: {input_names}")
+        outputs = self.session.run(None, {input_names[0]: np.ascontiguousarray(tensor)})
+        if len(outputs) != 1:
+            shapes = [value.shape for value in outputs]
+            raise RuntimeError(f"属性模型输出结构异常: {shapes}")
+        return outputs[0][0]
+
+
+# ---------------------------------------------------------------------------
+# 以下为 Paddle 基准实现，仅 onnx_regression.py 数值回归使用。
+# ---------------------------------------------------------------------------
+
+
 def paddle_model_files(model_dir: Path, stem: str) -> tuple[Path, Path]:
     """同时接受官网旧静态图 `.pdmodel` 和微调后 Paddle 3 的 `.json`。"""
     pdmodel = model_dir / f"{stem}.pdmodel"
@@ -41,6 +240,8 @@ def paddle_model_files(model_dir: Path, stem: str) -> tuple[Path, Path]:
 
 
 def _paddle_predictor(model: Path, params: Path, device: str):
+    from paddle.inference import Config, create_predictor
+
     _require_files([model, params])
     config = Config(str(model), str(params))
     if device == "GPU":
@@ -49,7 +250,9 @@ def _paddle_predictor(model: Path, params: Path, device: str):
         config.disable_gpu()
         config.set_cpu_math_library_num_threads(1)
     config.switch_ir_optim(True)
-    config.enable_memory_optim()
+    if model.suffix == ".pdmodel":
+        # memory_optimize_pass 只在旧 IR 注册；PIR(.json) 模型开了会直接崩。
+        config.enable_memory_optim()
     config.disable_glog_info()
     return create_predictor(config)
 
@@ -283,17 +486,20 @@ class PlateRecognizer:
         onnx_dir = cache_root / "20230229" / "onnx"
         _require_files([onnx_dir / name for name in self.REQUIRED_NAMES])
 
-        # 0.1.3 在导入时检查 HOMEPATH。先指向已验证的外部模型目录，
-        # 可阻止包在用户目录中隐式下载；导入后立即恢复进程环境。
-        previous_homepath = os.environ.get("HOMEPATH")
+        # 0.1.3 在 import 时检查 ~/.hyperlpr3/20230229，缺失就联网下载。
+        # Windows 读 HOMEPATH、Linux 读 HOME，两个都临时指向已验证的外部模型目录，
+        # 导入后立即恢复进程环境。
+        previous = {key: os.environ.get(key) for key in ("HOME", "HOMEPATH")}
+        os.environ["HOME"] = str(vehicle_model_dir)
         os.environ["HOMEPATH"] = str(vehicle_model_dir)
         try:
             hyperlpr3 = importlib.import_module("hyperlpr3")
         finally:
-            if previous_homepath is None:
-                os.environ.pop("HOMEPATH", None)
-            else:
-                os.environ["HOMEPATH"] = previous_homepath
+            for key, value in previous.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
         self.engine = hyperlpr3.LicensePlateCatcher(folder=str(cache_root))
 
     def predict(self, crop: np.ndarray) -> str:

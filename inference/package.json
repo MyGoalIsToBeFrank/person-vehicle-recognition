@@ -1,9 +1,0 @@
-{
-  "name": "inference-xlsx-export",
-  "private": true,
-  "type": "module",
-  "dependencies": {
-    "@oai/artifact-tool": "2.8.43",
-    "sharp": "0.35.3"
-  }
-}

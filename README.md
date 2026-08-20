@@ -65,9 +65,6 @@ python finetune/import_aizoo.py
 python finetune/review_server.py            # 默认开启属性预标注
 python finetune/review_server.py --no-prelabel   # 无 GPU 时跳过预标注
 python finetune/review_server.py --seed 42       # 固定随机出图顺序（默认每次启动随机）
-
-# 清空全部已确认/金标准并并回候选，从零重新标注（二次确认可用 --yes 跳过）
-python finetune/reset_progress.py --yes
 ```
 
 ## 二、微调
@@ -97,16 +94,18 @@ python finetune/reset_progress.py --yes
 
 ### 模型清单与溯源
 
-微调管线的三个训练对象（推理端当前部署权重 → 微调起点）：
+微调管线的三个训练对象（推理端部署产物 → 微调起点）：
 
-| 环节        | 模型                      | 当前部署权重                                              | 微调起点                                                                                  | 训练框架                   |
-| ----------- | ------------------------- | --------------------------------------------------------- | ----------------------------------------------------------------------------------------- | -------------------------- |
-| ① 人物检测 | PP-YOLOE-S                | `models/human/mot_ppyoloe_s_36e_pipeline`               | `models/original/person_detector/mot_ppyoloe_s_36e_pipeline.pdparams`（官方可训练权重） | `vendor/PaddleDetection` |
-| ② 人物属性 | PP-HGNet small（26 属性） | `models/human/PPHGNet_small_person_attribute_954_infer` | 同一部署权重转回可训练结构                                                                | `vendor/PaddleClas`      |
-| ③ 口罩识别 | YOLOv5s（2 类）           | `models/face_mask_yolov5`（ONNX）                       | 由 ONNX 反建的 YOLOv5s 权重                                                               | `vendor/yolov5`          |
+| 环节        | 模型                      | 推理端部署（models/onnx/）                              | 微调起点                                                                                  | 训练框架                   |
+| ----------- | ------------------------- | ------------------------------------------------------- | ----------------------------------------------------------------------------------------- | -------------------------- |
+| ① 人物检测 | PP-YOLOE-S                | `person_detector/person_detector.onnx`（图内 NMS）    | `models/original/person_detector/mot_ppyoloe_s_36e_pipeline.pdparams`（官方可训练权重） | `vendor/PaddleDetection` |
+| ② 人物属性 | PP-HGNet small（26 属性） | `person_attribute/person_attribute.onnx`              | 官方部署权重转回可训练结构                                                                | `vendor/PaddleClas`      |
+| ③ 口罩识别 | YOLOv5s（2 类）           | `models/finetuned/face_mask/face_mask_detection.onnx` | 由 ONNX 反建的 YOLOv5s 权重                                                               | `vendor/yolov5`          |
 
-推理端还有三个**不参与微调**的模型：车辆检测 `models/vehicle/mot_ppyoloe_s_36e_ppvehicle`、
-车辆属性 `models/vehicle/vehicle_attribute_model`、车牌 `models/vehicle/.hyperlpr3`（HyperLPR3）。
+推理端还有三个**不参与微调**的模型：车辆检测 `models/onnx/vehicle_detector/`（PP-YOLOE 裁
+NMS 导出 + numpy NMS）、车辆属性 `models/onnx/vehicle_attribute/`、车牌
+`models/vehicle/.hyperlpr3`（HyperLPR3）。Paddle 原始权重保留在 `models/` 各源目录，
+供数值回归对照与再次转换使用。
 
 每个权重的上游地址、归档 SHA-256、本地文件哈希和授权边界记录在
 [`models/MODEL_SOURCES.md`](models/MODEL_SOURCES.md) 及各目录的 `SOURCE.md`；
@@ -115,13 +114,13 @@ python finetune/reset_progress.py --yes
 ## 三、推理
 
 `inference/` 是精简的推理应用端（约四百行），与训练管线解耦：**输入**是一个图片目录，
-**输出**是结构化中文业务结果（JSON + Excel），中间不含框、置信度等模型细节。
-完整接口说明（配置项、命令行覆盖、模型替换、输出字段定义）见
-[**inference/README.md**](inference/README.md)。
+**输出**是结构化中文业务结果（`result.json`），中间不含框、置信度等模型细节。
+推理引擎是 onnxruntime 单引擎（GPU 自动探测，无卡回落 CPU），全部模型消费
+`models/onnx/` 下的 ONNX 文件。完整接口说明（配置项、命令行覆盖、模型替换、
+输出字段定义）见 [**inference/README.md**](inference/README.md)。
 
 ```powershell
 python inference/run.py          # 读 easy_test/ → 原子写 inference/result.json
-node inference/export_xlsx.mjs   # 读 result.json → 写 inference/result.xlsx（带缩略图）
 ```
 
 输出速览（字段完整定义与示例在 inference/README.md）：
@@ -129,11 +128,9 @@ node inference/export_xlsx.mjs   # 读 result.json → 写 inference/result.xlsx
 - `result.json`：JSON 数组，每张图片一项，含 `图片位置`、`处理耗时（毫秒）`、
   `识别内容`（`行人` 数组：性别/年龄/朝向/眼镜/帽子/口罩/包/上装/下装/鞋靴等；
   `车辆` 数组：颜色/车型/车牌）。
-- `result.xlsx`：每张图片一行：缩略图、图片位置、耗时、行人识别内容、车辆识别内容。
 
-验收微调结果后，只改 `inference/config.py` 里的 `PERSON_DETECTOR_DIR`、
-`PERSON_ATTRIBUTE_DIR`、`FACE_MASK_DIR`（属性模型另把
-`PERSON_ATTRIBUTE_CROP_SCALE` 改为 1.0）即完成切换；回滚时改回原值。
+验收微调结果后，按 `inference/README.md` 的「Paddle → ONNX 转换」一节把新权重转成
+ONNX 放进 `models/onnx/` 对应目录即完成切换；回滚时换回旧文件。
 模型一律按目录名指定，不做哈希校验。
 
 ## 目录结构与中间产物位置
@@ -162,7 +159,8 @@ dataset/
     _legacy/                    # 旧版数据归档，不参与任何流程
 finetune/                       # 微调侧：数据准备、标注 WebUI、训练、训练报告（见 finetune/README.md）
 inference/                      # 推理侧：精简的推理应用端，只读模型和图片（见 inference/README.md）
-models/                         # 全部模型权重（original + finetuned，来源见 MODEL_SOURCES.md）
+deploy/                         # 部署侧：Dockerfile、容器入口、依赖清单、部署文档（见 deploy/DOCKER.md）
+models/                         # 全部模型权重（onnx 为推理部署产物；original/finetuned 为训练侧权重，来源见 MODEL_SOURCES.md）
 vendor/                         # PaddleClas / PaddleDetection / yolov5 源码（仅训练用）
 easy_test/                      # 推理测试图片
 ```
@@ -189,12 +187,11 @@ python3 -m venv .venv-train
 .venv/bin/python finetune/review_server.py            # 标注 WebUI
 .venv-train/bin/python finetune/train_person_detector.py --device GPU
 .venv/bin/python inference/run.py
-node inference/export_xlsx.mjs
 ```
 
 - Windows 专用的 CUDA DLL 注册（`configure_runtime_dlls`）在非 Windows 平台自动跳过，
   无需处理。
 - `.torch-cu130/` 是本机 Windows 的手工 torch 目录，Linux/macOS 上删掉，正常 pip 安装即可。
-- macOS 无 CUDA，Paddle/torch 都走 CPU；口罩与车牌 ONNX 模型本来就只用 CPU。
-- 推理侧如需容器化：`inference/` + `models/` + `.venv` 依赖即可成镜像，训练侧不进镜像；
-  训练容器化时把 `dataset/` 和 `models/` 以卷挂载进容器（`raw` 可只读），代码无需改动。
+- macOS 无 CUDA，Paddle/torch 都走 CPU；推理侧 onnxruntime 同样回落 CPU。
+- 推理侧容器化直接用 `deploy/`（`docker build -f deploy/Dockerfile -t person-vehicle-recognition .`），
+  训练侧不进镜像，详见 [deploy/DOCKER.md](deploy/DOCKER.md)。

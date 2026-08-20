@@ -1,22 +1,23 @@
 # inference
 
-推理应用端：只读取外部模型目录和图片目录的精简结构化识别流程。代码只有三个职责：
+推理应用端：只读取模型目录和图片目录的精简结构化识别流程。推理引擎是
+**onnxruntime 单引擎**（GPU 自动探测，无卡回落 CPU），所有模型都消费 ONNX 文件。
+代码只有三个职责：
 
 - `run.py`：配置、命令行、逐图计时、原子写 JSON。
-- `model_adapters.py`：Paddle、ONNX Runtime 和 HyperLPR3 的薄模型适配。
+- `model_adapters.py`：onnxruntime 与 HyperLPR3 的薄模型适配（含检测器的 numpy NMS）。
 - `pipeline.py`：对象裁切、属性解码和中文业务结果。
+
+另有一个开发用校验脚本 `onnx_regression.py`（见下文「数值回归」），不参与推理。
 
 ## 运行
 
-日常只编辑 [`config.py`](config.py)，所有输入、输出、环境和七个模型目录都在此配置。
-切换微调前后权重只需改 `PERSON_DETECTOR_DIR`、`PERSON_ATTRIBUTE_DIR`、
-`FACE_MASK_DIR` 和口罩 SHA-256，无需改动任何其他代码。
+日常只编辑 [`config.py`](config.py)，所有输入、输出、环境和模型目录都在此配置。
 
 ```bash
 python inference/run.py
 python inference/run.py --device CPU --limit 1
-python inference/run.py --data-dir easy_test --person-attribute-dir models/finetuned/person_attribute
-python inference/run.py --person-detector-dir models/finetuned/person_detector
+python inference/run.py --data-dir easy_test --person-detector-dir models/onnx/person_detector
 ```
 
 命令行参数只用于临时覆盖 `config.py`。程序复用配置的推理环境；运行时不会下载模型。
@@ -27,29 +28,33 @@ python inference/run.py --person-detector-dir models/finetuned/person_detector
 **输入图片从哪来**：默认读 `config.py` 的 `DATA_DIR`（当前为 `easy_test/`）下全部图片；
 临时换目录用 `--data-dir 路径`；只想试前几张加 `--limit N`。
 
-**结果写到哪**：默认原子写 `inference/result.json`（`RESULT_JSON`），Excel 导出固定读它并写
-`inference/result.xlsx`（`RESULT_XLSX`）。临时改输出用 `--result-json 路径`。
+**结果写到哪**：默认原子写 `inference/result.json`（`RESULT_JSON`）。
+临时改输出用 `--result-json 路径`，或 `--output-dir 目录`（自动写 `<目录>/result.json`）。
 
-**如何替换模型**：改 `config.py` 里对应的目录常量即可，七个模型互不耦合：
+**如何替换模型**：改 `config.py` 里对应的目录常量即可。每个模型目录里放**恰好一个
+`.onnx`** 文件（车辆检测目录另带 `nms_config.json`），换模型就是换文件：
 
-| 配置项 | 作用 | 微调后指向 |
+| 配置项 | 作用 | 当前指向 |
 | --- | --- | --- |
-| `PERSON_DETECTOR_DIR` | 行人检测（Paddle 部署模型目录） | `models/finetuned/person_detector` |
-| `PERSON_ATTRIBUTE_DIR` | 行人 26 属性 | `models/finetuned/person_attribute` |
-| `FACE_MASK_DIR` | 口罩（含 `face_mask_detection.onnx` 与 `synset.txt`） | `models/finetuned/face_mask` |
-| `VEHICLE_DETECTOR_DIR` / `VEHICLE_ATTRIBUTE_DIR` / `PLATE_MODEL_DIR` | 车辆与车牌（不参与微调） | 保持不变 |
+| `PERSON_DETECTOR_DIR` | 行人检测（PP-YOLOE-S，图内 NMS） | `models/onnx/person_detector` |
+| `PERSON_ATTRIBUTE_DIR` | 行人 26 属性（PP-HGNet small） | `models/onnx/person_attribute` |
+| `VEHICLE_DETECTOR_DIR` | 车辆检测（PP-YOLOE，图外 numpy NMS） | `models/onnx/vehicle_detector` |
+| `VEHICLE_ATTRIBUTE_DIR` | 车辆颜色/车型 | `models/onnx/vehicle_attribute` |
+| `FACE_MASK_DIR` | 口罩（`face_mask_detection.onnx` + `synset.txt`） | `models/finetuned/face_mask` |
+| `PLATE_MODEL_DIR` | 车牌（HyperLPR3 模型缓存目录的上一级） | `models/vehicle` |
 
-换模型只需把对应 `*_DIR` 指向新目录（按目录名指定，不做哈希校验）。换微调属性模型时把
-`PERSON_ATTRIBUTE_CROP_SCALE` 从官网模型习惯的 `1.3` 改为 `1.0`（微调模型按 WebUI 红框
-原尺寸训练）。以上每一项都能在命令行用同名参数（如 `--person-detector-dir`）临时覆盖，
-便于不改动配置直接对比新旧模型效果。
+每一项都能在命令行用同名参数（如 `--person-detector-dir`）临时覆盖，
+便于不改动配置直接对比新旧模型效果。按目录名指定，不做哈希校验。
+
+`DEVICE = "GPU"` 表示优先 GPU：装有 onnxruntime-gpu 且有可用显卡时走
+CUDAExecutionProvider，否则自动回落 CPU 并打印实际后端。
 
 ## 输入输出格式
 
 **输入**：一个图片目录（`DATA_DIR`，默认 `easy_test/`），程序按文件名排序逐张处理，
 支持常见图片格式；`--limit N` 只取前 N 张。无网络依赖，模型全部从本地目录加载。
 
-**输出一：`result.json`**（默认 `inference/result.json`，全部图片成功后才原子替换旧文件）。
+**输出：`result.json`**（默认 `inference/result.json`，全部图片成功后才原子替换旧文件）。
 标准 JSON 数组，每张图片一项，只有三个顶层字段：
 
 ```json
@@ -99,55 +104,33 @@ python inference/run.py --person-detector-dir models/finetuned/person_detector
 口罩识别使用行人原检测框上部 40% 的裁片，业务上只有两类：检不到可靠口罩框
 （无脸、背面、模糊小脸等）统一归为“未佩戴口罩”。
 
-**输出二：`result.xlsx`**（`node inference/export_xlsx.mjs` 生成）。默认写
-`inference/result.xlsx`；工作簿“识别结果”每张图片一行，五列：
-`图像`（保持比例的原图缩略图）、`图片位置`、`处理耗时（毫秒）`、`行人`、`车辆`
-（识别内容的多行文本）。只读 `result.json` 和其中记录的原图，不引入框、置信度或
-额外统计。
+## 数值回归（Paddle → ONNX 切换前的验收）
+
+ONNX 文件由 Paddle 权重转换而来（转换工具与流程见
+[deploy/DOCKER.md](../deploy/DOCKER.md)）。每次换 ONNX 后必须跑回归，确认与
+Paddle 基准输出一致：
+
+```bash
+.venv/Scripts/python.exe -X utf8 inference/onnx_regression.py
+```
+
+通过标准：属性模型逐元素最大误差 ≤ 1e-4；检测器检出框数量完全一致、
+框坐标/分数误差 ≤ 5e-4。当前四个模型全部通过，且 43 张测试图端到端业务结果
+与 Paddle 管线 100% 一致。
 
 ## 外部目录 / Docker 用法
 
-推理端被设计成可以脱离项目目录，只把 `inference/` 和 `models/` 放进容器，
-输入图片与结果目录通过挂载卷传入：
+推理端被设计成可以脱离项目目录：镜像只含 `inference/` 代码和 `models/onnx/` 等部署
+权重，输入图片与结果目录通过挂载卷传入。构建、运行、分享全流程见
+[deploy/DOCKER.md](../deploy/DOCKER.md)，简版：
 
 ```bash
-# 容器内运行：读取外部挂载的 /data/images，输出到外部挂载的 /output
-python inference/run.py \
-  --data-dir /data/images \
-  --output-dir /output
-
-# Excel 导出同样可指定输入 JSON 与输出 xlsx 位置
-node inference/export_xlsx.mjs \
-  --result-json /output/result.json \
-  --data-dir /data/images \
-  --output-xlsx /output/result.xlsx
+docker build -f deploy/Dockerfile -t person-vehicle-recognition .
+docker run --rm --gpus all \
+  -v /宿主机/图片目录:/data/images -v /宿主机/输出目录:/data/output \
+  person-vehicle-recognition
+# 结果写在 /宿主机/输出目录/result.json；无 GPU 的机器去掉 --gpus all 自动走 CPU
 ```
 
-要点：
-
-- `--data-dir` 覆盖图片输入目录；`--output-dir` 指定输出目录，程序自动在目录下写
-  `result.json`（优先于 `--result-json`）。
-- `--result-json` 仍保留，用于直接覆盖 JSON 文件路径。
-- `export_xlsx.mjs` 用 `--data-dir` 把 `result.json` 里的相对图片位置解析回绝对路径读取缩略图；
-  用 `--output-xlsx` 把 Excel 也写到外部目录。
-- 容器内启动 WebUI 时记得 `--host 0.0.0.0` 并映射端口。
-
-GPU 选项用于 Paddle 模型；当前口罩和车牌 ONNX 模型使用 CPU Execution Provider。
-
-所有权重的上游地址、归档哈希、本地文件哈希和授权边界统一记录在 [`models/MODEL_SOURCES.md`](../models/MODEL_SOURCES.md) 及各权重目录的 `SOURCE.md` 中。
-
-## 导出 Excel
-
-```bash
-node inference/export_xlsx.mjs
-
-# 外部目录 / Docker 场景
-node inference/export_xlsx.mjs \
-  --result-json /output/result.json \
-  --data-dir /data/images \
-  --output-xlsx /output/result.xlsx
-```
-
-导出程序只读取 `result.json` 和其中记录的原图，结果默认写到 `inference/result.xlsx`。
-工作簿每张图片一行，包含保持比例的原图缩略图、图片位置、耗时、行人和车辆识别内容；
-不引入框、置信度、完整 JSON 或额外统计。
+所有权重的上游地址、归档哈希和授权边界统一记录在
+[`models/MODEL_SOURCES.md`](../models/MODEL_SOURCES.md) 及各权重目录的 `SOURCE.md` 中。

@@ -9,7 +9,13 @@ import sys
 from pathlib import Path
 
 
-os.environ.pop("FLAGS_enable_pir_api", None)
+if "--legacy" in sys.argv:
+    # 旧 IR（inference.pdmodel）：paddle2onnx 转 ONNX 用这个格式最稳。
+    # 注意不能用 FLAGS_enable_pir_api=0（会让 eager 的 sigmoid 收到旧 IR Variable 崩溃），
+    # 3.3 的正路是 paddle.pir_utils.OldIrGuard（见下方导出段）。
+    pass
+else:
+    os.environ.pop("FLAGS_enable_pir_api", None)
 
 import paddle  # noqa: E402
 
@@ -28,6 +34,11 @@ def main() -> int:
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--paddleclas-dir", type=Path, required=True)
+    parser.add_argument(
+        "--legacy",
+        action="store_true",
+        help="导出旧 IR（inference.pdmodel），供 paddle2onnx 转 ONNX 用",
+    )
     args = parser.parse_args()
 
     sys.path.insert(0, str(args.paddleclas_dir.resolve()))
@@ -37,15 +48,25 @@ def main() -> int:
     model.set_state_dict(paddle.load(str(args.checkpoint)))
     inference = InferenceModel(model)
     inference.eval()
-    static = paddle.jit.to_static(
-        inference,
-        input_spec=[
-            paddle.static.InputSpec(shape=[None, 3, 256, 192], dtype="float32", name="x")
-        ],
-    )
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    paddle.jit.save(static, str(args.output_dir / "inference"))
-    model_file = args.output_dir / "inference.json"
+    if args.legacy:
+        with paddle.pir_utils.OldIrGuard():
+            static = paddle.jit.to_static(
+                inference,
+                input_spec=[
+                    paddle.static.InputSpec(shape=[None, 3, 256, 192], dtype="float32", name="x")
+                ],
+            )
+            paddle.jit.save(static, str(args.output_dir / "inference"))
+    else:
+        static = paddle.jit.to_static(
+            inference,
+            input_spec=[
+                paddle.static.InputSpec(shape=[None, 3, 256, 192], dtype="float32", name="x")
+            ],
+        )
+        paddle.jit.save(static, str(args.output_dir / "inference"))
+    model_file = args.output_dir / ("inference.pdmodel" if args.legacy else "inference.json")
     params_file = args.output_dir / "inference.pdiparams"
     if not model_file.is_file() or not params_file.is_file():
         raise RuntimeError("Paddle 部署模型导出不完整")

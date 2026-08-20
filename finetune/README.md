@@ -1,7 +1,7 @@
 # 三模型人工金标准微调
 
-目标是基于现有官网权重继续微调人物检测、人物属性和口罩识别三个模型，再通过
-`inference/config.py` 接回推理端。原 ONNX/Paddle 部署模型和人物检测可训练权重
+目标是基于现有官网权重继续微调人物检测、人物属性和口罩识别三个模型，再转成 ONNX
+接回推理端（`models/onnx/`）。原 ONNX/Paddle 部署模型和人物检测可训练权重
 保存在 `models/original/`，不会被训练脚本覆盖。
 
 ## 数据布局
@@ -32,12 +32,6 @@ python finetune/prepare_dataset.py --input-dir dataset/raw/prw-download/frames -
 python finetune/import_aizoo.py
 ```
 
-从版本 2 旧布局迁移候选（一次性，已执行过则无需重复）：
-
-```powershell
-python finetune/migrate_v3.py
-```
-
 ## 2. 人工核对与尘土化（WebUI）
 
 ```powershell
@@ -60,12 +54,6 @@ python finetune/review_server.py --seed 42  # 可选：固定随机出图顺序�
 回改模式按最近保存在前排列，重新保存即原地更新（可修正标错的记录）；检测页重新确认时
 按框 id 对齐重建属性裁剪——框未动标签保留，框动了重裁剪但保留标签，框删除则连同其
 属性裁剪与标注一并移除。「排除」只从候选移除，不写金标准，也不删除 raw 原图。
-
-从头重新标注（清空全部 confirmed/gold 与增强产物，候选并回）：
-
-```powershell
-python finetune/reset_progress.py --yes
-```
 
 ## 3. 微调三个模型
 
@@ -106,22 +94,20 @@ python finetune/reset_progress.py --yes
 若导出步骤报 `sigmoid(): argument must be Value`，按 `train_person_detector.py`
 注释里的手动命令用 `env -u FLAGS_enable_pir_api` 重跑一次即可。
 
-## 4. 用一个配置切换回推理端
+## 4. 转 ONNX 并切回推理端
 
-验收微调结果后，只改 `inference/config.py`：
-
-```python
-PERSON_DETECTOR_DIR = TRAINING_OUTPUT_DIR / "person_detector"
-PERSON_ATTRIBUTE_DIR = TRAINING_OUTPUT_DIR / "person_attribute"
-PERSON_ATTRIBUTE_CROP_SCALE = 1.0
-FACE_MASK_DIR = TRAINING_OUTPUT_DIR / "face_mask"
-```
-
-随后仍运行原入口：
+推理端只消费 `models/onnx/` 下的 ONNX 文件（onnxruntime 引擎）。微调产物
+（`models/finetuned/` 的 Paddle 权重）按 [deploy/DOCKER.md](../deploy/DOCKER.md) 的
+「Paddle → ONNX 转换」一节转成 ONNX，覆盖 `models/onnx/` 对应目录后运行：
 
 ```powershell
 python inference/run.py
-node inference/export_xlsx.mjs
 ```
 
-回滚时把这三个模型目录和口罩哈希改回原值即可。车辆、车牌、JSON 和 Excel 流程不变。
+切换前务必跑数值回归，确认 ONNX 与 Paddle 输出一致（详见 inference/README.md）：
+
+```powershell
+.venv/Scripts/python.exe -X utf8 inference/onnx_regression.py
+```
+
+回滚时把 `models/onnx/` 里对应 .onnx 换回旧文件即可。车辆、车牌流程不变。
