@@ -19,6 +19,30 @@ docker run --rm --gpus all \
 
 ## 2. 构建镜像
 
+代码仓库不保存模型权重和 `vendor/PaddleDetection`：二者体积较大，并且模型权重在外部分发前需要单独确认许可。服务器推荐使用固定工作区 `/home/ubuntu/pvr-src`，Git 管代码、忽略文件保存本机资产。首次建立：
+
+```bash
+git clone https://github.com/MyGoalIsToBeFrank/person-vehicle-recognition.git \
+  /home/ubuntu/pvr-src
+
+mkdir -p /home/ubuntu/pvr-src/models /home/ubuntu/pvr-src/vendor
+cp -a /home/ubuntu/docker-ctx/models/. /home/ubuntu/pvr-src/models/
+cp -a /home/ubuntu/docker-ctx/vendor/. /home/ubuntu/pvr-src/vendor/
+```
+
+以后直接在服务器更新和构建：
+
+```bash
+cd /home/ubuntu/pvr-src
+git pull --ff-only origin main
+
+DOCKER_BUILDKIT=1 docker build --progress=plain \
+  -f deploy/Dockerfile \
+  -t person-vehicle-recognition:v2.0.1 .
+```
+
+`models/` 中的构建权重和 `vendor/` 是被 Git 忽略的本机资产，普通 `git pull` 不会删除它们。不要在这个工作区执行 `git clean -fdx`，否则会清除这些被忽略的构建输入。
+
 在仓库根目录执行：
 
 ```bash
@@ -205,6 +229,20 @@ curl -sS http://127.0.0.1:8000/metrics
 
 ## 8. 离线分发与镜像仓库
 
+当前已经验证的离线产物位于构建服务器：
+
+```text
+/home/ubuntu/pvr-v2.0.0-ampere.tar.zst
+SHA-256: e8d4823e3967ae40e29e26b33628c201c150854b3b68558a13ad9550a7cb1f25
+```
+
+发送方可以使用 `scp`、移动硬盘或内网文件服务传输压缩包和校验文件：
+
+```bash
+scp ubuntu@SERVER:/home/ubuntu/pvr-v2.0.0-ampere.tar.zst .
+scp ubuntu@SERVER:/home/ubuntu/pvr-v2.0.0-ampere.tar.zst.sha256 .
+```
+
 离线文件：
 
 ```bash
@@ -231,7 +269,36 @@ docker push registry.example.com/pvr:v2.0.0
 
 外部分发前必须单独确认所有权重的再分发权利，尤其口罩模型。源码许可证不能自动证明第三方模型权重可再分发。
 
-## 9. 回滚和清理
+## 9. 关机、恢复和继续开发
+
+当前正式容器使用 `--restart unless-stopped`，Docker 服务应设置为开机启动，engine cache 位于命名卷 `pvr-engine-cache`。确认：
+
+```bash
+systemctl is-enabled docker
+docker inspect pvr-v2 \
+  --format 'status={{.State.Status}} restart={{.HostConfig.RestartPolicy.Name}}'
+docker volume inspect pvr-engine-cache
+```
+
+队列、正在推理的任务和 60 秒结果缓存都只存在于内存；关机后旧 `session_id` 不保证可查询，调用方必须重新提交未确认完成的图片。镜像、容器配置、Git 工作区和 engine cache 卷不会因为正常关机丢失。
+
+确认队列为空后可以直接正常关机，不必先手动停止容器：
+
+```bash
+curl -fsS http://127.0.0.1:8000/v1/health
+sudo shutdown -h now
+```
+
+开机后 Docker 会按重启策略启动容器。若关机前曾人工执行 `docker stop pvr-v2`，则手动恢复：
+
+```bash
+docker start pvr-v2
+curl -fsS http://127.0.0.1:8000/v1/health
+```
+
+继续开发时只修改 `/home/ubuntu/pvr-src` 或本地 Git 工作区，构建新镜像标签并用不同端口预验；不要进入运行中的容器直接改文件。
+
+## 10. 回滚和清理
 
 本次重构唯一回滚点是 `v1.0` tag。不要删除仍需回滚的 `person-vehicle-recognition:v1.0/slim`。
 
