@@ -13,10 +13,11 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 PROJECT_ROOT = HERE.parent
-sys.path.insert(0, str(PROJECT_ROOT / "inference"))
 sys.path.insert(0, str(HERE))
 
 import config  # noqa: E402
+
+_DLL_HANDLES = config.configure_runtime_dlls(config.TRAINING_VENV_DIR)
 
 if config.TORCH_PACKAGE_DIR.is_dir():
     sys.path.insert(0, str(config.TORCH_PACKAGE_DIR))
@@ -26,7 +27,6 @@ import numpy as np  # noqa: E402
 import torch  # noqa: E402
 import yaml  # noqa: E402
 
-_DLL_HANDLES = config.configure_runtime_dlls(config.TRAINING_VENV_DIR)
 from dataset_schema import (  # noqa: E402
     flatten_annotations,
     load_dataset,

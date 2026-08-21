@@ -1,8 +1,16 @@
-# 三模型人工金标准微调
+# 三模型人工二次标注与金标准微调
 
-目标是基于现有官网权重继续微调人物检测、人物属性和口罩识别三个模型，再通过
-`inference/config.py` 接回推理端。原 ONNX/Paddle 部署模型和人物检测可训练权重
-保存在 `models/original/`，不会被训练脚本覆盖。
+这里是完全离线的研发工具链：用既有模型生成候选，经 WebUI 人工二次标注形成
+金标准，再分别微调人物检测、人物属性和口罩识别。车辆检测、车辆属性和车牌
+PP-OCRv3 不在本目录训练。
+
+离线路径集中在 `finetune/config.py`；候选预标注只使用
+`finetune/prelabel_models.py`。二者不会被生产服务或 Docker runtime 导入，已经删除的
+v1 Python 推理管线也不会作为训练依赖恢复。原部署模型和人物检测训练权重保存在
+`models/original/`，训练输出写入 `models/finetuned/`，不会覆盖原始起点。
+
+当前交付默认使用已经存在的微调权重，不要求也不会在 Docker 构建中重新训练。
+只有需要扩充数据或产生新权重时才运行本文命令。
 
 ## 数据布局
 
@@ -17,6 +25,36 @@
 
 所有 JSON 为 COCO 风格（`images/annotations/categories`，`bbox=[x,y,w,h]`），
 裁剪图带 `source_image_id` 以继承 train/val/test 划分。
+
+`dataset_schema.py` 当前 schema version 为 3。ID 由源路径/源标注确定性生成；
+保存采用同目录临时文件、`fsync` 和原子替换。`dataset/raw/` 永远只读，候选、裁片、
+人工金标准、增强和 COCO 导出全部位于 `dataset/processed/`。
+
+## 0. 环境和本机资产
+
+Git 不保存训练数据、模型权重或第三方源码。完整训练机器必须具有：
+
+```text
+dataset/raw/ 与 dataset/processed/
+models/original/ 与 models/finetuned/
+vendor/PaddleDetection/
+vendor/PaddleClas/
+vendor/yolov5/
+```
+
+参考环境是 Windows、Python 3.10、Paddle GPU 与 CUDA PyTorch 的独立
+`.venv-train`。依赖清单见 `finetune/requirements.txt`，不要安装进生产 `.venv`，也不
+进入 Docker runtime。GPU wheel 与驱动/CUDA 强相关；复现实验时必须先记录
+`nvidia-smi`、Python、Paddle、Torch、CUDA/cuDNN 和三个 vendor commit。
+
+配置检查：
+
+```powershell
+.venv-train\Scripts\python.exe -X utf8 -c "import sys; sys.path.insert(0,'finetune'); import config; print(config.PROJECT_ROOT); print(config.TRAINING_OUTPUT_DIR)"
+```
+
+候选生成和 WebUI 默认重入项目 `.venv`，训练脚本使用 `.venv-train`。环境只由 `uv`
+维护，不要直接运行系统 `pip` 改写已经验证的环境。
 
 ## 1. 生成候选
 
@@ -55,9 +93,9 @@ python finetune/review_server.py --seed 42  # 可选：固定随机出图顺序�
 按框 id 对齐重建属性裁剪——框未动标签保留，框动了重裁剪但保留标签，框删除则连同其
 属性裁剪与标注一并移除。「排除」只从候选移除，不写金标准，也不删除 raw 原图。
 
-需要从头重新标注时，直接在 WebUI 各页的「回改已保存」模式逐条修正；如需整体清空，
-删除 `dataset/processed/` 下对应阶段的 `confirmed.json` / `gold.json`（和 `4_augmented/`）
-即可，候选文件不受影响。
+需要从头重新标注时，优先在 WebUI 的「回改已保存」逐条修正。整体删除
+`confirmed.json`、`gold.json` 或 `4_augmented/` 会丢失人工工作，执行前必须做独立备份并
+明确核对绝对路径；候选文件与 raw 原图是不同的数据所有者，不能用递归清理一起删除。
 
 ## 3. 微调三个模型
 
@@ -98,22 +136,48 @@ python finetune/review_server.py --seed 42  # 可选：固定随机出图顺序�
 若导出步骤报 `sigmoid(): argument must be Value`，按 `train_person_detector.py`
 注释里的手动命令用 `env -u FLAGS_enable_pir_api` 重跑一次即可。
 
-## 4. 用一个配置切换回推理端
+## 4. 将新权重接入生产服务
 
-验收微调结果后，只改 `inference/config.py`：
+生产服务没有运行时模型目录开关，也不使用旧 `inference/run.py`。新权重必须经过完整、
+可审计的导出与镜像重建：
 
-```python
-PERSON_DETECTOR_DIR = TRAINING_OUTPUT_DIR / "person_detector"
-PERSON_ATTRIBUTE_DIR = TRAINING_OUTPUT_DIR / "person_attribute"
-PERSON_ATTRIBUTE_CROP_SCALE = 1.0
-FACE_MASK_DIR = TRAINING_OUTPUT_DIR / "face_mask"
+1. 人物检测最终 checkpoint 位于
+   `models/finetuned/person_detector_checkpoints/model_final.*`；
+2. 人体属性最佳权重和部署图位于 `models/finetuned/person_attribute/`；
+3. 口罩最佳权重及 dynamic-batch ONNX 位于 `models/finetuned/face_mask/`；
+4. `model_export/export_models.py` 从这些固定路径生成动态 ONNX，并记录源 SHA-256、
+   预处理、profile、opset 和输出语义；
+5. `deploy/Dockerfile` 在 model-exporter 阶段运行 ONNX checker，随后编译原生服务；
+6. 新镜像使用新标签和新 engine cache 卷预验，不能覆盖正在服务的 v2.0.0；
+7. 通过逐模型精度闸门、43 图端到端回归、10 分钟稳定负载和两倍过载恢复后才切换。
+
+```bash
+DOCKER_BUILDKIT=1 docker build --progress=plain \
+  -f deploy/Dockerfile \
+  -t person-vehicle-recognition:v2.0.1 .
+
+docker volume create pvr-engine-cache-v201
+docker run -d --name pvr-v201 --gpus '"device=0"' \
+  -p 8001:8000 \
+  -v pvr-engine-cache-v201:/var/cache/pvr \
+  person-vehicle-recognition:v2.0.1
 ```
 
-随后仍运行原入口（命令行批量或 FastAPI 服务均可）：
+TensorRT engine 不能从旧镜像或另一张 GPU 复制。新模型改变 ONNX SHA 后会自然生成新的
+cache key。回滚使用旧镜像标签及其原 engine cache 卷，不通过修改运行容器内文件实现。
+
+## 5. 训练记录和再现要求
+
+历史数据量、曲线和最佳指标见 `TRAINING_REPORT.md`。这些数字只对应当时的数据、划分、
+起点权重和环境。重新标注、改变增强、超参数或依赖后，应保存三份原始训练日志并重新运行：
 
 ```powershell
-python inference/run.py
-python service/app.py
+.venv-train\Scripts\python.exe finetune/training_report.py `
+  --det-log logs/person-det.log `
+  --attr-log logs/person-attr.log `
+  --mask-log logs/mask.log `
+  --output finetune/TRAINING_REPORT.md
 ```
 
-回滚时把这三个模型目录改回原值即可。车辆、车牌与输出流程不变。
+报告生成不等于精度闸门通过。生产发布仍需在部署 GPU 上比较 FP32/FP16/候选 INT8 的业务
+输出，人工复核所有差异，并保留模型文件 SHA-256、镜像 ID、engine cache key 和测试集版本。

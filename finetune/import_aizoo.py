@@ -11,7 +11,6 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 PROJECT_ROOT = HERE.parent
-sys.path.insert(0, str(PROJECT_ROOT / "inference"))
 sys.path.insert(0, str(HERE))
 
 import config  # noqa: E402

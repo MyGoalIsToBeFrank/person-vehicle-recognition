@@ -11,7 +11,9 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import os
 import random
+import subprocess
 import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -20,13 +22,25 @@ from typing import Any, Callable
 
 HERE = Path(__file__).resolve().parent
 PROJECT_ROOT = HERE.parent
-sys.path.insert(0, str(PROJECT_ROOT / "inference"))
 sys.path.insert(0, str(HERE))
+
+import config  # noqa: E402
+
+
+def enter_project_environment() -> None:
+    python_name = "python.exe" if os.name == "nt" else "python"
+    python_dir = "Scripts" if os.name == "nt" else "bin"
+    expected = config.INFERENCE_VENV_DIR / python_dir / python_name
+    if expected.is_file() and Path(sys.executable).resolve() != expected.resolve():
+        completed = subprocess.run([str(expected), str(__file__), *sys.argv[1:]], cwd=PROJECT_ROOT)
+        raise SystemExit(completed.returncode)
+
+
+enter_project_environment()
 
 import cv2  # noqa: E402
 import numpy as np  # noqa: E402
 
-import config  # noqa: E402
 from dataset_schema import (  # noqa: E402
     STAGES,
     annotation_id,

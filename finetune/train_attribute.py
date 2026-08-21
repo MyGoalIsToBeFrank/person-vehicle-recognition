@@ -14,7 +14,6 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 PROJECT_ROOT = HERE.parent
 os.environ.setdefault("FLAGS_enable_pir_api", "0")
-sys.path.insert(0, str(PROJECT_ROOT / "inference"))
 sys.path.insert(0, str(HERE))
 
 import config  # noqa: E402

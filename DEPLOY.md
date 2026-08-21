@@ -12,7 +12,7 @@
 - JPEG 使用 GPU 解码/预处理热路径；PNG、BMP、WebP 可用，但不计入高吞吐 SLA；
 - FastAPI 只负责异步 HTTP 边界，内部是单实例 C++/CUDA/TensorRT worker、有界队列和有界结果缓存。
 
-最终运行镜像不包含 Paddle 推理服务、ONNX Runtime、DALI 或多 Python 进程模型副本。现有模型没有重新训练，`finetune/` 没有修改。运行栈固定为 CUDA 12.6.3、cuDNN 9.5、TensorRT 10.5；Python 依赖由 `uv 0.11.2` 锁定，构建过程不调用 `pip`。
+最终运行镜像不包含 Paddle 推理服务、ONNX Runtime、DALI 或多 Python 进程模型副本。当前镜像使用已有微调权重，构建过程不会运行或改写 `finetune/`。运行栈固定为 CUDA 12.6.3、cuDNN 9.5、TensorRT 10.5；Python 依赖由 `uv 0.11.2` 锁定，构建过程不调用 `pip`。
 
 当前镜像身份：
 
@@ -32,6 +32,7 @@
 pvr-v2.0.0-share/
 ├── DEPLOY.md
 ├── MANIFEST.sha256
+├── README.md
 ├── person-vehicle-recognition-v2.0.0.tar.zst
 ├── person-vehicle-recognition-v2.0.0.tar.zst.sha256
 ├── reference_results_rtx3080ti_fp16.json
@@ -230,7 +231,79 @@ python3 test_service.py --server http://SERVER:8000 \
 
 退出码为 0 表示所有图片均为 `done`；连接失败、协议失败或超时为 1；至少一张图片进入 `error/unknown/expired` 为 2。`reference_results_rtx3080ti_fp16.json` 是 2026-08-20 在 RTX 3080 Ti FP16 engine 上得到的参考业务结果，用于人工检查字段和数量，不应在另一台 GPU 上作为逐字符精度断言。尤其车牌、阈值附近的属性和检测数量可能有合理差异。
 
-## 7. 日常监控和调试
+## 7. 视频、RTSP 和摄像头输入
+
+推理容器只接收图片，不直接接收整段视频，也不会主动连接 RTSP。视频输入由独立
+`video-client` 读取、抽帧和提交：
+
+```text
+RTSP / 摄像头 / 视频文件
+  ↓
+video-client 按 sample_fps 抽帧并编码 JPEG
+  ↓ 每批最多 64 帧
+POST /v1/task-batches
+  ↓ 每个帧返回一个 session_id
+POST /v1/results:batch
+  ↓
+camera_id + frame_index + timestamp_ms + 识别结果 → JSONL
+```
+
+session ID 不是视频 ID。一个视频不会只返回一个 ID；每个被采样帧都有独立 ID，客户端
+在本地维护 `session_id → camera_id/frame_index/timestamp_ms`，拿到终态后写出一行 JSON。
+
+推理服务容器：
+
+```bash
+docker run -d --name pvr-v2 --gpus '"device=0"' \
+  --restart unless-stopped -p 8000:8000 \
+  -v pvr-engine-cache:/var/cache/pvr \
+  person-vehicle-recognition:v2.0.0
+```
+
+另开一个容器读取 RTSP，不给它 GPU：
+
+```bash
+mkdir -p "$PWD/output"
+docker run --rm --network host \
+  -v "$PWD/output:/output" \
+  person-vehicle-recognition:v2.0.0 \
+  video-client \
+  --camera-id gate-1 \
+  --source 'rtsp://user:password@camera/stream' \
+  --sample-fps 2 \
+  --batch-size 32 \
+  --max-pending 4096 \
+  --poll-interval 0.05 \
+  --jpeg-quality 90 \
+  --server http://127.0.0.1:8000 \
+  --output /output/gate-1.jsonl
+```
+
+本地视频只需替换 source，并挂载只读目录：
+
+```bash
+docker run --rm --network host \
+  -v /data/videos:/videos:ro \
+  -v "$PWD/output:/output" \
+  person-vehicle-recognition:v2.0.0 \
+  video-client --camera-id file-demo \
+  --source /videos/demo.mp4 --sample-fps 1 \
+  --server http://127.0.0.1:8000 \
+  --output /output/demo.jsonl
+```
+
+一行输出示例：
+
+```json
+{"camera_id":"gate-1","frame_index":1250,"timestamp_ms":50000,"session_id":"...","status":"done","result":{"行人":[],"车辆":[]},"timing_ms":{"queue":2.1,"inference":113.4,"total":115.5}}
+```
+
+当前客户端每次启动处理一个 source。服务 429 时当前批次计为 dropped，不会无限积压。
+基础版本尚未包含 RTSP 自动重连、断点持久化或摄像头控制面；大量实时流部署前应补充有界
+最新帧缓冲、采集/提交线程分离、墙钟时间、重连和可靠结果存储，但仍不要把这些生命周期
+塞入 TensorRT 推理容器。
+
+## 8. 日常监控和调试
 
 先按以下顺序定位问题：
 
@@ -262,7 +335,7 @@ docker volume inspect pvr-engine-cache
 
 不要进入运行容器直接修改代码或模型；那种改动无法可靠复现。开发应在 Git 工作区修改，构建新标签并使用新容器/端口预验。
 
-## 8. 单卡、多卡和容量规划
+## 9. 单卡、多卡和容量规划
 
 一个容器当前只拥有一个原生 worker，并使用分配给它的一张 GPU。不要用 `--gpus all` 期待单容器自动跨多卡提速。多卡服务器应每张卡运行一个容器、一个独立端口和一个独立 engine cache：
 
@@ -280,13 +353,22 @@ done
 
 结果缓存在各实例内存中，因此负载均衡必须保持“提交 session 的实例”和“查询该 session 的实例”一致。最简单的调用方做法是连同 session ID 保存后端端口；也可使用基于 cookie/一致性哈希的粘性路由。本版本没有跨实例共享结果存储。
 
+现版本不会因检测到多张 A30 就自动跨卡，也不会因 CPU 核心更多就自动增加 native worker。
+推荐先按一卡一容器横向扩展并实测每卡，再逐步改造：
+
+- 网关保存或编码 `session_id → GPU 实例` 路由，保证批提交和批查询命中同一后端；
+- 需要实例故障转移时，再增加有 TTL 的共享结果存储，而不是让所有容器共享 engine cache；
+- 多核 CPU 优先承载分片的视频采集/RTSP 重连、HTTP 摄入和兼容格式解码；
+- 双路 CPU/多卡主机再评估 NUMA 绑核、GPU/网卡亲和性和多个摄入进程；
+- 每增加并行度都重新验证内存上界、锁竞争、完成吞吐和 p95，不以 CPU 使用率更高为目标。
+
 RTX 3080 Ti 短测只得到约 154 图/s 的饱和完成能力；160 图/s 输入的短测 p95 总延迟约 580 ms。这不是 A30 正式数字，也不是连续 10 分钟发布结果。A30 必须在本机重建 engine 后实测；容量按下式留出 30% 余量：
 
 ```text
 实例数 = ceil(目标图片/s ÷ (A30 单实例实测完成图片/s × 0.7))
 ```
 
-## 9. 关机、恢复和持久化
+## 10. 关机、恢复和持久化
 
 镜像、容器配置、Git 工作区和命名卷不会因正常关机丢失。队列、正在推理的任务和 60 秒结果缓存只存在于内存，关机后旧 session ID 不保证可查询。
 
@@ -305,7 +387,7 @@ docker start pvr-v2
 curl -fsS http://127.0.0.1:8000/v1/health
 ```
 
-## 10. 从源码更新并在服务器构建
+## 11. 从源码更新并在服务器构建
 
 推荐固定工作区 `/home/ubuntu/pvr-src`。Git 只管理代码；被忽略的 `models/` 和 `vendor/PaddleDetection` 是服务器本机构建资产，普通 `git pull` 不会删除它们。不要执行 `git clean -fdx`。
 
@@ -322,7 +404,61 @@ DOCKER_BUILDKIT=1 docker build --progress=plain \
 
 用新名称、端口和 cache 卷预验，确认后再切换流量；保留 `v1.0` 回滚镜像。不要在共享服务器执行无目标的 `docker system prune -a`。
 
-## 11. 使用网盘分享
+## 12. 将当前服务器交给接收方验收
+
+当前服务监听服务器 `0.0.0.0:8000`，但应用自身没有登录认证或 TLS。不要直接把 8000
+开放给整个公网，也不要共享现有 `ubuntu` 密码、私人 SSH key、GitHub token、sudo、
+Docker socket 或模型目录写权限。
+
+推荐流程：
+
+1. 接收方生成自己的 SSH key，并只把 `.pub` 公钥发给管理员；
+2. 管理员创建有截止时间的 `pvr-review` 临时账号；
+3. 该公钥只允许转发到 `127.0.0.1:8000`，不复用维护者账号；
+4. 云安全组的 SSH 22 只允许接收方固定公网 IP；
+5. 验收结束删除临时公钥/账号和安全组规则。
+
+接收方建立本地隧道：
+
+```bash
+ssh -N -L 18000:127.0.0.1:8000 \
+  pvr-review@117.50.173.181
+```
+
+在另一个终端体验，不需要登录服务器 shell：
+
+```bash
+curl -i http://127.0.0.1:18000/v1/health
+python3 test_service.py \
+  --server http://127.0.0.1:18000 \
+  --output acceptance-results.json
+```
+
+应交付给接收方的“服务器验收小套件”：
+
+```text
+DEPLOY.md
+test_service.py
+samples/sample_front_vehicle.jpg
+samples/sample_rear_vehicle.jpg
+samples/sample_multi_vehicle.jpg
+reference_results_rtx3080ti_fp16.json
+服务器地址、SSH 端口、临时用户名、主机指纹
+访问开始/截止时间、允许用途、问题联系人
+```
+
+接收方验收顺序：health ready → 三张样例全部 done → 自有图片测试 → 视频文件/RTSP（如被
+授权）→ 查看 `timing_ms` → 记录问题。参考输出仅用于理解字段，不要求跨 GPU 逐字符相等。
+
+仓库访问与服务器访问分开授权。私有 GitHub 仓库应把对方 GitHub 账号加入协作者；若只
+需要服务器拉取代码，使用仓库只读 Deploy key。GitHub 不含模型、数据集和 Docker 镜像，
+这一点必须提前说明。
+
+管理员还应记录交接时的：Git commit、镜像 ID、外层分享包 SHA-256、GPU、health cache
+key、账号创建/撤销时间。长期外部服务应另加 HTTPS、API key/OAuth、速率限制和访问审计，
+不能把临时 SSH 隧道当成正式生产网关。
+
+## 13. 使用网盘分享
 
 建议只上传两个外层文件：
 

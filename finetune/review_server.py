@@ -32,8 +32,6 @@ from urllib.parse import parse_qs, urlparse
 
 HERE = Path(__file__).resolve().parent
 PROJECT_ROOT = HERE.parent
-sys.path.insert(0, str(PROJECT_ROOT / "inference"))
-
 import config  # noqa: E402
 
 
@@ -363,7 +361,7 @@ class ReviewStore:
             return None
         try:
             if self._attribute_model is None:
-                from model_adapters import PaddleAttributeModel, paddle_model_files
+                from prelabel_models import PaddleAttributeModel, paddle_model_files
 
                 model_file, params_file = paddle_model_files(
                     config.PERSON_ATTRIBUTE_DIR, "inference"

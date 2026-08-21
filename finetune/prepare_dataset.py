@@ -17,8 +17,6 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 PROJECT_ROOT = HERE.parent
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp"}
-sys.path.insert(0, str(PROJECT_ROOT / "inference"))
-
 import config  # noqa: E402
 
 
@@ -48,7 +46,7 @@ from dataset_schema import (  # noqa: E402
     stored_path,
     xyxy_to_xywh,
 )
-from model_adapters import PaddleDetector  # noqa: E402
+from prelabel_models import PaddleDetector  # noqa: E402
 
 
 def arguments() -> argparse.Namespace:
