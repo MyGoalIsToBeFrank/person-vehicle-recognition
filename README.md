@@ -8,6 +8,7 @@
 当前交付不重新训练模型。`finetune/` 是可审计、可继续使用的离线工具；生产镜像只消费已经确认的权重，构建和运行均不会读取训练数据、启动训练或改写 `finetune/`。
 
 镜像接收、运行、接口、视频使用、服务器验收和排障请同时阅读 [DEPLOY.md](DEPLOY.md)。
+公开仓库地址、克隆方式和交付边界见 [PROJECT_LINK.md](PROJECT_LINK.md)。
 
 ## 1. 当前可交付状态
 
@@ -18,11 +19,14 @@
 | HTTP 服务 | 单实例、异步提交/查询、有界队列、有界结果缓存 |
 | 运行精度 | 当前 7 个 TensorRT engine 均为 FP16；INT8 尚未通过逐模型精度闸门，不启用 |
 | 车牌模块 | PaddleDetection PP-OCRv3 det + rec，不再使用 HyperLPR |
-| 当前服务器 | RTX 3080 Ti 预验，容器 `pvr-v2` 正常运行；A30 仍需本机重建 engine 和正式验收 |
+| 目标硬件 | NVIDIA A30 24GB；必须在目标机首启重建 engine 并实测容量 |
 | 离线分享包 | 镜像、`DEPLOY.md`、测试客户端、3 张样例、参考输出、双层 SHA-256 |
 | GitHub 内容 | 代码、配置、文档、锁文件；不含原始数据、模型权重和第三方源码树 |
 
-RTX 3080 Ti 的短测约为 154 图/s 饱和完成能力，160 图/s 短时固定输入的 p95 总延迟约 580 ms。这只证明当前镜像和异步边界可工作，不是 A30 正式发布吞吐，也不能据此声称单卡数千图/s。
+公开源码仓库：<https://github.com/MyGoalIsToBeFrank/person-vehicle-recognition>。仓库不包含
+受限数据、模型权重或 Docker 镜像，公开源码不能替代完整部署交付。
+
+项目不预先宣称单卡数千图/s。正式容量必须在目标 A30 上按本文定义连续压测后发布。
 
 ## 2. 系统全景
 
@@ -77,11 +81,12 @@ logs/                        训练、构建、回归和临时日志
 
 仓库只保留数据/模型来源索引、标注训练导出服务代码、Dockerfile、依赖锁、不含原图的训练报告和接收方说明。由此分为三种接收权限：
 
-1. **只体验服务**：只需临时访问当前服务器的 8000 端口和验收资料；
+1. **只体验服务**：只需访问部署方提供的受控服务端点和验收资料；
 2. **部署镜像**：需要离线分享包，不需要源码和训练数据；
 3. **重新构建/微调**：除 Git 仓库外，还必须单独获得有权使用的 `models/`、`vendor/` 和相应数据集。
 
-当前构建服务器 `/home/ubuntu/pvr-src` 有 Docker 构建需要的 `models/` 和 `vendor/PaddleDetection`，但没有训练数据、`vendor/PaddleClas` 或 `vendor/yolov5`，所以它可以重建生产镜像，不能直接重跑完整三模型微调。
+能够重建生产镜像的工作区必须另行准备 `models/` 和 `vendor/PaddleDetection`；能够重跑
+完整三模型微调的工作区还需要训练数据、`vendor/PaddleClas` 和 `vendor/yolov5`。
 
 ## 4. 模型清单
 
@@ -417,12 +422,13 @@ python3 deploy/test_service.py --server http://127.0.0.1:8000 sample.jpg
 ceil(目标图片/s ÷ (A30 单实例实测完成图片/s × 0.7))
 ```
 
-## 13. 当前服务器体验
+## 13. 受控远程验收
 
-不要共享现有 `ubuntu` 密码、个人私钥、GitHub token 或 sudo。推荐给接收方创建临时验收账号，只允许 SSH 本地端口转发到 `127.0.0.1:8000`：
+若部署方提供远程验收，不要共享维护账号密码、个人私钥、GitHub token 或 sudo。应创建
+有期限的独立验收账号，只允许 SSH 本地端口转发到服务监听地址：
 
 ```bash
-ssh -N -L 18000:127.0.0.1:8000 pvr-review@117.50.173.181
+ssh -N -L 18000:127.0.0.1:8000 REVIEW_USER@DEPLOY_HOST
 ```
 
 接收方另开终端：
@@ -432,15 +438,18 @@ curl http://127.0.0.1:18000/v1/health
 python3 test_service.py --server http://127.0.0.1:18000
 ```
 
-给接收方：`DEPLOY.md`、`test_service.py`、`samples/`、参考输出、服务器地址、临时用户名、SSH 主机指纹、验收期限和联系人。服务体验不需要 Docker socket、源码写权限、模型文件或训练数据。
+给接收方：`DEPLOY.md`、`test_service.py`、`samples/`、参考输出，以及单独安全发送的端点、
+临时用户名、SSH 主机指纹、验收期限和联系人。服务体验不需要 Docker socket、模型目录
+写权限或训练数据。
 
-仓库访问单独把对方 GitHub 账号加入私有仓库，或给只读 Deploy key。当前服务没有应用层认证，不能把 8000 无条件暴露公网；临时体验优先受限 SSH 隧道，长期部署再加 TLS、认证、限流和审计。
+源码仓库公开可读；部署端点仍必须独立授权。当前服务没有应用层认证，不能把 8000
+无条件暴露公网；临时体验优先使用受限 SSH 隧道，长期部署再加 TLS、认证、限流和审计。
 
 ## 14. 离线镜像分享
 
 ```text
-/home/ubuntu/pvr-v2.0.0-share-bundle.tar.zst
-/home/ubuntu/pvr-v2.0.0-share-bundle.tar.zst.sha256
+pvr-v2.0.0-handover.tar.zst
+pvr-v2.0.0-handover.tar.zst.sha256
 ```
 
 外层 SHA-256 以同目录 `.sha256` sidecar 为唯一准值；README 被收入外层包，因此不能在包内
@@ -470,13 +479,13 @@ tests/         协议与服务边界测试
 - TTL 默认 60 秒，容器重启后未确认结果不持久化；
 - 视频客户端当前每进程一个 source，尚无自动重连和持久任务存储；
 - 输出不包含检测框坐标；INT8 尚未通过精度闸门；
-- 3080 Ti 短测不能替代 A30 正式测试；
+- 任意开发卡短测都不能替代目标 A30 正式测试；
 - GitHub 不包含受限数据和权重；权重再分发必须单独审查。
 
 ## 17. 文档索引
 
-- [DEPLOY.md](DEPLOY.md)：镜像接收、API、视频、服务器体验、调试、多卡、关机和网盘；
-- [deploy/DOCKER_TUTORIAL.md](deploy/DOCKER_TUTORIAL.md)：构建服务器和 Docker 维护细节；
+- [DEPLOY.md](DEPLOY.md)：镜像接收、API、视频、远程验收、调试、多卡、关机和网盘；
+- [deploy/DOCKER_TUTORIAL.md](deploy/DOCKER_TUTORIAL.md)：构建主机和 Docker 维护细节；
 - [service/README.md](service/README.md)：HTTP/PVRB 协议；
 - [finetune/README.md](finetune/README.md)：离线标注与训练；
 - [finetune/TRAINING_REPORT.md](finetune/TRAINING_REPORT.md)：历史训练数据量和指标；

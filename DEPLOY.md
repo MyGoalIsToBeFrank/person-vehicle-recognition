@@ -35,7 +35,8 @@ pvr-v2.0.0-share/
 ├── README.md
 ├── person-vehicle-recognition-v2.0.0.tar.zst
 ├── person-vehicle-recognition-v2.0.0.tar.zst.sha256
-├── reference_results_rtx3080ti_fp16.json
+├── reference_results_fp16.json
+├── PROJECT_LINK.md
 ├── test_service.py
 └── samples/
     ├── sample_front_vehicle.jpg
@@ -43,11 +44,11 @@ pvr-v2.0.0-share/
     └── sample_rear_vehicle.jpg
 ```
 
-发送方会另外提供外层文件 `pvr-v2.0.0-share-bundle.tar.zst.sha256`。Linux 接收方先校验、解包，再校验包内每个文件：
+发送方会另外提供外层文件 `pvr-v2.0.0-handover.tar.zst.sha256`。Linux 接收方先校验、解包，再校验包内每个文件：
 
 ```bash
-sha256sum -c pvr-v2.0.0-share-bundle.tar.zst.sha256
-zstd -dc pvr-v2.0.0-share-bundle.tar.zst | tar -xf -
+sha256sum -c pvr-v2.0.0-handover.tar.zst.sha256
+zstd -dc pvr-v2.0.0-handover.tar.zst | tar -xf -
 cd pvr-v2.0.0-share
 sha256sum -c MANIFEST.sha256
 sha256sum -c person-vehicle-recognition-v2.0.0.tar.zst.sha256
@@ -229,7 +230,7 @@ python3 test_service.py --server http://SERVER:8000 \
   camera-01.jpg camera-02.jpg
 ```
 
-退出码为 0 表示所有图片均为 `done`；连接失败、协议失败或超时为 1；至少一张图片进入 `error/unknown/expired` 为 2。`reference_results_rtx3080ti_fp16.json` 是 2026-08-20 在 RTX 3080 Ti FP16 engine 上得到的参考业务结果，用于人工检查字段和数量，不应在另一台 GPU 上作为逐字符精度断言。尤其车牌、阈值附近的属性和检测数量可能有合理差异。
+退出码为 0 表示所有图片均为 `done`；连接失败、协议失败或超时为 1；至少一张图片进入 `error/unknown/expired` 为 2。`reference_results_fp16.json` 是 FP16 engine 的参考业务结果，用于人工检查字段和数量，不应在另一台 GPU 上作为逐字符精度断言。尤其车牌、阈值附近的属性和检测数量可能有合理差异。
 
 ## 7. 视频、RTSP 和摄像头输入
 
@@ -362,7 +363,8 @@ done
 - 双路 CPU/多卡主机再评估 NUMA 绑核、GPU/网卡亲和性和多个摄入进程；
 - 每增加并行度都重新验证内存上界、锁竞争、完成吞吐和 p95，不以 CPU 使用率更高为目标。
 
-RTX 3080 Ti 短测只得到约 154 图/s 的饱和完成能力；160 图/s 输入的短测 p95 总延迟约 580 ms。这不是 A30 正式数字，也不是连续 10 分钟发布结果。A30 必须在本机重建 engine 后实测；容量按下式留出 30% 余量：
+不同 GPU、图片分辨率、目标密度和 engine profile 的结果不可互相代替。A30 必须在本机重建
+engine 后按上述口径实测；容量按下式留出 30% 余量：
 
 ```text
 实例数 = ceil(目标图片/s ÷ (A30 单实例实测完成图片/s × 0.7))
@@ -389,12 +391,14 @@ curl -fsS http://127.0.0.1:8000/v1/health
 
 ## 11. 从源码更新并在服务器构建
 
-推荐固定工作区 `/home/ubuntu/pvr-src`。Git 只管理代码；被忽略的 `models/` 和 `vendor/PaddleDetection` 是服务器本机构建资产，普通 `git pull` 不会删除它们。不要执行 `git clean -fdx`。
+推荐固定工作区 `/opt/pvr-src`。Git 只管理代码；被忽略的 `models/` 和
+`vendor/PaddleDetection` 是构建主机资产，普通 `git pull` 不会删除它们。不要执行
+`git clean -fdx`。
 
-私有仓库应把服务器 SSH 公钥添加为只读 GitHub Deploy key，然后：
+公开仓库可直接拉取：
 
 ```bash
-cd /home/ubuntu/pvr-src
+cd /opt/pvr-src
 git pull --ff-only origin main
 
 DOCKER_BUILDKIT=1 docker build --progress=plain \
@@ -404,16 +408,16 @@ DOCKER_BUILDKIT=1 docker build --progress=plain \
 
 用新名称、端口和 cache 卷预验，确认后再切换流量；保留 `v1.0` 回滚镜像。不要在共享服务器执行无目标的 `docker system prune -a`。
 
-## 12. 将当前服务器交给接收方验收
+## 12. 受控远程验收
 
-当前服务监听服务器 `0.0.0.0:8000`，但应用自身没有登录认证或 TLS。不要直接把 8000
-开放给整个公网，也不要共享现有 `ubuntu` 密码、私人 SSH key、GitHub token、sudo、
-Docker socket 或模型目录写权限。
+若部署方提供远程验收，服务可以监听目标主机 `0.0.0.0:8000`，但应用自身没有登录认证
+或 TLS。不要直接把 8000 开放给整个公网，也不要共享维护账号密码、私人 SSH key、
+GitHub token、sudo、Docker socket 或模型目录写权限。
 
 推荐流程：
 
 1. 接收方生成自己的 SSH key，并只把 `.pub` 公钥发给管理员；
-2. 管理员创建有截止时间的 `pvr-review` 临时账号；
+2. 管理员创建有截止时间的独立验收账号；
 3. 该公钥只允许转发到 `127.0.0.1:8000`，不复用维护者账号；
 4. 云安全组的 SSH 22 只允许接收方固定公网 IP；
 5. 验收结束删除临时公钥/账号和安全组规则。
@@ -422,7 +426,7 @@ Docker socket 或模型目录写权限。
 
 ```bash
 ssh -N -L 18000:127.0.0.1:8000 \
-  pvr-review@117.50.173.181
+  REVIEW_USER@DEPLOY_HOST
 ```
 
 在另一个终端体验，不需要登录服务器 shell：
@@ -442,34 +446,33 @@ test_service.py
 samples/sample_front_vehicle.jpg
 samples/sample_rear_vehicle.jpg
 samples/sample_multi_vehicle.jpg
-reference_results_rtx3080ti_fp16.json
-服务器地址、SSH 端口、临时用户名、主机指纹
+reference_results_fp16.json
+部署端点、SSH 端口、临时用户名、主机指纹
 访问开始/截止时间、允许用途、问题联系人
 ```
 
 接收方验收顺序：health ready → 三张样例全部 done → 自有图片测试 → 视频文件/RTSP（如被
 授权）→ 查看 `timing_ms` → 记录问题。参考输出仅用于理解字段，不要求跨 GPU 逐字符相等。
 
-仓库访问与服务器访问分开授权。私有 GitHub 仓库应把对方 GitHub 账号加入协作者；若只
-需要服务器拉取代码，使用仓库只读 Deploy key。GitHub 不含模型、数据集和 Docker 镜像，
+源码仓库公开可读；部署端点仍需单独授权。GitHub 不含模型、数据集和 Docker 镜像，
 这一点必须提前说明。
 
 管理员还应记录交接时的：Git commit、镜像 ID、外层分享包 SHA-256、GPU、health cache
 key、账号创建/撤销时间。长期外部服务应另加 HTTPS、API key/OAuth、速率限制和访问审计，
-不能把临时 SSH 隧道当成正式生产网关。
+不能把验收用 SSH 隧道当成正式生产网关。
 
 ## 13. 使用网盘分享
 
 建议只上传两个外层文件：
 
 ```text
-pvr-v2.0.0-share-bundle.tar.zst
-pvr-v2.0.0-share-bundle.tar.zst.sha256
+pvr-v2.0.0-handover.tar.zst
+pvr-v2.0.0-handover.tar.zst.sha256
 ```
 
 推荐流程：
 
-1. 从构建服务器把两个文件下载到电脑上的专用网盘目录；不要放进 Git 仓库。
+1. 从构建主机把两个文件下载到电脑上的专用网盘目录；不要放进 Git 仓库。
 2. 等待网盘客户端显示“同步完成”，再创建分享链接。
 3. 使用指定接收人、访问密码和有效期；不要建立永久公开链接。
 4. 通过另一个通信渠道把外层 SHA-256 发给接收方。接收方下载后先校验，再解包。
@@ -478,9 +481,9 @@ pvr-v2.0.0-share-bundle.tar.zst.sha256
 Windows PowerShell 下载示例（先自行创建目标目录）：
 
 ```powershell
-scp ubuntu@SERVER:/home/ubuntu/pvr-v2.0.0-share-bundle.tar.zst `
+scp USER@BUILD_HOST:/path/to/pvr-v2.0.0-handover.tar.zst `
   'D:\BaiduNetdiskDownload\PVR\'
-scp ubuntu@SERVER:/home/ubuntu/pvr-v2.0.0-share-bundle.tar.zst.sha256 `
+scp USER@BUILD_HOST:/path/to/pvr-v2.0.0-handover.tar.zst.sha256 `
   'D:\BaiduNetdiskDownload\PVR\'
 ```
 
@@ -489,8 +492,8 @@ scp ubuntu@SERVER:/home/ubuntu/pvr-v2.0.0-share-bundle.tar.zst.sha256 `
 ```bash
 mkdir -p pvr-share-parts
 split -b 1900M -d -a 3 \
-  pvr-v2.0.0-share-bundle.tar.zst \
-  pvr-share-parts/pvr-v2.0.0-share-bundle.tar.zst.part-
+  pvr-v2.0.0-handover.tar.zst \
+  pvr-share-parts/pvr-v2.0.0-handover.tar.zst.part-
 sha256sum pvr-share-parts/* > pvr-share-parts/SHA256SUMS
 ```
 
@@ -499,10 +502,10 @@ sha256sum pvr-share-parts/* > pvr-share-parts/SHA256SUMS
 ```bash
 cd pvr-share-parts
 sha256sum -c SHA256SUMS
-cat pvr-v2.0.0-share-bundle.tar.zst.part-* \
-  > ../pvr-v2.0.0-share-bundle.tar.zst
+cat pvr-v2.0.0-handover.tar.zst.part-* \
+  > ../pvr-v2.0.0-handover.tar.zst
 cd ..
-sha256sum -c pvr-v2.0.0-share-bundle.tar.zst.sha256
+sha256sum -c pvr-v2.0.0-handover.tar.zst.sha256
 ```
 
 某些网盘拦截 `.tar.zst` 后缀时，可以上传前改名为 `.bin`，但必须同时告知接收方下载后恢复原文件名；不要重新压缩已经压缩过的镜像包。
