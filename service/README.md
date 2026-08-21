@@ -21,7 +21,7 @@ HTTP/1.1 202 Accepted
 GET /v1/tasks/{session_id}
 ```
 
-状态为 `pending`、`running`、`done` 或 `error`。完成响应包含 `timing_ms.queue/inference/total` 和中文 `行人/车辆/车牌` 业务结果。未知 ID 为 404，已过期结果为 410。
+状态为 `pending`、`running`、`done` 或 `error`。完成响应包含 `timing_ms.queue/inference/total` 和中文 `行人/车辆` 业务结果，车牌位于每条车辆记录内。未知 ID 为 404，已过期结果为 410。
 
 ## 高吞吐批提交
 

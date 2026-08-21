@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "captured_at": "2026-08-21",
+  "runtime": {
+    "image": "person-vehicle-recognition:v2.0.0",
+    "image_id": "sha256:9aebf7312a1607e07d1c184ec8bebc288488a254dd382d5c485f770b3adc7439",
+    "gpu": "NVIDIA GeForce RTX 3080 Ti",
+    "precision": "FP16"
+  },
+  "usage": "Reference output for manual smoke-test review only. Do not require exact equality across GPUs, engine builds, or threshold-boundary cases.",
+  "samples": {
+    "sample_front_vehicle.jpg": {
+      "sha256": "fb6dfbe2579d6c36d013ab90e7b3c42004f4af6123b408c97b106d19f7f15132",
+      "result": {
+        "行人": [],
+        "车辆": [
+          {"颜色": "白色", "车型": "轿车", "车牌": "皖D5H594"}
+        ]
+      }
+    },
+    "sample_multi_vehicle.jpg": {
+      "sha256": "e5395654afa310483f620dce8004f29a1212e4ac84d9eb5ab2ba7a268b4a1733",
+      "result": {
+        "行人": [],
+        "车辆": [
+          {"颜色": "未知", "车型": "轿车", "车牌": "未识别"},
+          {"颜色": "绿色", "车型": "公交车", "车牌": "A85050"},
+          {"颜色": "未知", "车型": "公交车", "车牌": "甘A88888"},
+          {"颜色": "绿色", "车型": "掀背车", "车牌": "未识别"}
+        ]
+      }
+    },
+    "sample_rear_vehicle.jpg": {
+      "sha256": "8d8fe737dc6f84433ecac28dffb74aa2de059137039cccc022aa9977bdc4d4ad",
+      "result": {
+        "行人": [
+          {
+            "性别": "女",
+            "年龄": "18至60岁",
+            "朝向": "正面",
+            "佩戴眼镜": "否",
+            "佩戴帽子": "否",
+            "手持物品": "否",
+            "包": "无",
+            "上装": {"袖长": "短袖", "款式": []},
+            "下装": ["长外套", "长裤", "裙装"],
+            "鞋靴": "非靴子",
+            "口罩": "未佩戴口罩"
+          }
+        ],
+        "车辆": [
+          {"颜色": "白色", "车型": "轿车", "车牌": "皖A8F559"}
+        ]
+      }
+    }
+  }
+}

@@ -37,7 +37,7 @@ docker run -d --name pvr-v2 --gpus all \
   person-vehicle-recognition:v2.0.0
 ```
 
-首次启动构建本机 engine，期间 `/v1/health` 返回 503；完成后才进入 ready。构建、运行、离线分发和 A30 换机步骤见 [deploy/DOCKER_TUTORIAL.md](deploy/DOCKER_TUTORIAL.md)。
+首次启动构建本机 engine，期间 `/v1/health` 返回 503；完成后才进入 ready。项目维护者的构建细节见 [deploy/DOCKER_TUTORIAL.md](deploy/DOCKER_TUTORIAL.md)；镜像接收方应使用包含接口、部署、样例验收和排障说明的 [DEPLOY.md](DEPLOY.md)。
 
 ## API
 
